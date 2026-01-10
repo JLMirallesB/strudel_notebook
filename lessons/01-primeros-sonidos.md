@@ -1,7 +1,3 @@
-<script setup>
-import StrudelBox from '../.vitepress/components/StrudelBox.vue'
-</script>
-
 # Lección 1: Primeros sonidos
 
 En esta lección aprenderás a generar tus primeros sonidos con Strudel.

@@ -1,7 +1,3 @@
-<script setup>
-import StrudelBox from '../.vitepress/components/StrudelBox.vue'
-</script>
-
 # Lección 3: Melodías
 
 En esta lección aprenderás a crear melodías y trabajar con escalas.

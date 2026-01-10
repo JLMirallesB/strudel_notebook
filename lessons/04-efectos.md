@@ -1,7 +1,3 @@
-<script setup>
-import StrudelBox from '../.vitepress/components/StrudelBox.vue'
-</script>
-
 # Lección 4: Efectos
 
 En esta lección aprenderás a aplicar efectos de audio para dar más carácter a tus sonidos.

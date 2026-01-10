@@ -1,7 +1,3 @@
-<script setup>
-import StrudelBox from '../.vitepress/components/StrudelBox.vue'
-</script>
-
 # Lección 2: Ritmos básicos
 
 En esta lección aprenderás a crear patrones rítmicos con batería.
