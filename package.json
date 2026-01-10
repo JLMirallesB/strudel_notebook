@@ -1,18 +1,19 @@
 {
-  "name": "strudel-guided-lab",
+  "name": "strudel-notebook",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview --host"
+    "dev": "vitepress dev",
+    "build": "vitepress build",
+    "preview": "vitepress preview"
   },
   "dependencies": {
-    "@strudel/web": "^1.2.6"
+    "@strudel/web": "^1.2.6",
+    "vue": "^3.4.0"
   },
   "devDependencies": {
     "typescript": "^5.5.4",
-    "vite": "^6.0.11"
+    "vitepress": "^1.5.0"
   }
 }
