@@ -8,6 +8,8 @@ const props = defineProps<{
 const slots = defineSlots()
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const isActive = ref(false)
+const isLoading = ref(false)
+const errorMessage = ref('')
 const codeContent = ref('')
 
 // Extraer código del slot default
@@ -23,45 +25,84 @@ onMounted(() => {
 })
 
 async function play() {
-  // Import dinámico para evitar SSR
-  const { evaluate, stop: engineStop } = await import('./audio/engine')
+  errorMessage.value = ''
+  isLoading.value = true
 
-  // Detener cualquier patrón activo globalmente
-  engineStop()
+  try {
+    // Import dinámico para evitar SSR
+    const { evaluate, stop: engineStop } = await import('./audio/engine')
 
-  // Marcar todas las otras cajas como inactivas
-  document.querySelectorAll('.strudel-box').forEach(box => {
-    box.classList.remove('is-active')
-  })
+    // Detener cualquier patrón activo globalmente
+    engineStop()
 
-  const code = textareaRef.value?.value || codeContent.value
-  const codeWithAnalyzer = code.includes('.analyze(')
-    ? code
-    : code.replace(/\n?$/, '.analyze(1)')
+    // Marcar todas las otras cajas como inactivas
+    document.querySelectorAll('.strudel-box').forEach(box => {
+      box.classList.remove('is-active')
+    })
 
-  await evaluate(codeWithAnalyzer)
-  isActive.value = true
+    const code = textareaRef.value?.value || codeContent.value
+
+    // Añadir .analyze(1) para las visualizaciones si no está ya
+    const codeWithAnalyzer = code.includes('.analyze(')
+      ? code
+      : code.trim() + '.analyze(1)'
+
+    await evaluate(codeWithAnalyzer)
+    isActive.value = true
+  } catch (error) {
+    console.error('[StrudelBox] Play error:', error)
+    errorMessage.value = error instanceof Error ? error.message : String(error)
+    isActive.value = false
+  } finally {
+    isLoading.value = false
+  }
 }
 
 async function stop() {
-  const { stop: engineStop } = await import('./audio/engine')
-  engineStop()
+  try {
+    const { stop: engineStop } = await import('./audio/engine')
+    engineStop()
+  } catch (error) {
+    console.error('[StrudelBox] Stop error:', error)
+  }
   isActive.value = false
+  errorMessage.value = ''
 }
 </script>
 
 <template>
-  <div class="strudel-box" :class="{ 'is-active': isActive }">
+  <div class="strudel-box" :class="{ 'is-active': isActive, 'has-error': errorMessage }">
     <div class="strudel-box-header">
-      <button class="play-btn" @click="play">▶ Play</button>
+      <button class="play-btn" @click="play" :disabled="isLoading">
+        {{ isLoading ? '⏳' : '▶' }} Play
+      </button>
       <button class="stop-btn" @click="stop">■ Stop</button>
       <span v-if="isActive" class="active-indicator">♪ Sonando</span>
     </div>
     <textarea
       ref="textareaRef"
       :value="codeContent"
-      @input="(e) => codeContent = (e.target as HTMLTextAreaElement).value"
+      @input="(e) => { codeContent = (e.target as HTMLTextAreaElement).value; errorMessage = '' }"
       spellcheck="false"
     />
+    <div v-if="errorMessage" class="error-message">
+      {{ errorMessage }}
+    </div>
   </div>
 </template>
+
+<style scoped>
+.has-error textarea {
+  border-color: #ef4444;
+}
+
+.error-message {
+  color: #ef4444;
+  font-size: 0.875rem;
+  padding: 0.5rem;
+  background: #fef2f2;
+  border-top: 1px solid #fecaca;
+  font-family: monospace;
+  white-space: pre-wrap;
+}
+</style>

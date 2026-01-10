@@ -1,5 +1,4 @@
 // AudioEngine: Singleton para gestionar Strudel y el contexto de audio
-import { initAudio, samples, webaudioRepl, getAnalyzerData, getAudioContext } from '@strudel/web'
 
 export const ANALYZER_ID = 1
 
@@ -22,10 +21,6 @@ export function onNoteEvent(callback: EventCallback) {
     const idx = noteListeners.indexOf(callback)
     if (idx >= 0) noteListeners.splice(idx, 1)
   }
-}
-
-function emitNoteEvent(event: NotationEvent) {
-  noteListeners.forEach(cb => cb(event))
 }
 
 // Conversiones de notas
@@ -57,80 +52,77 @@ function freqToMidi(freq: number): number {
   return 69 + 12 * Math.log2(freq / 440)
 }
 
-// REPL singleton
-let repl: ReturnType<typeof webaudioRepl> | null = null
+// Estado del REPL
 let initialized = false
+let initPromise: Promise<void> | null = null
 
-async function ensureInitialized() {
+// Referencia dinámica a las funciones de Strudel
+let strudelEvaluate: ((code: string, autoplay?: boolean) => Promise<unknown>) | null = null
+let strudelHush: (() => void) | null = null
+let strudelGetAnalyzerData: ((type: string, id: number) => Float32Array | null) | null = null
+let strudelGetAudioContext: (() => AudioContext) | null = null
+
+async function ensureInitialized(): Promise<void> {
   if (initialized) return
+  if (initPromise) return initPromise
 
-  await samples('https://strudel.cc/strudel.json').catch(() => {})
+  initPromise = (async () => {
+    // Import dinámico de @strudel/web
+    const strudel = await import('@strudel/web')
 
-  repl = webaudioRepl({
-    editPattern: (pattern) =>
-      pattern.onTrigger((hap, _now, cps, time) => {
-        const value = hap?.value ?? {}
-        const dur = hap?.duration && cps ? hap.duration / cps : 0
-        const sound = value.s ?? value.sound ?? 'unknown'
+    // Inicializar Strudel
+    await strudel.initStrudel()
 
-        let midi: number | undefined
-        let note: string | undefined
-        if (typeof value.note === 'string') {
-          note = value.note
-          midi = noteNameToMidi(note)
-        } else if (typeof value.note === 'number') {
-          midi = value.note
-          note = midiToNoteName(midi)
-        } else if (typeof value.n === 'number') {
-          midi = value.n
-          note = midiToNoteName(midi)
-        } else if (typeof value.freq === 'number') {
-          midi = freqToMidi(value.freq)
-          note = midiToNoteName(midi)
-        }
+    // Guardar referencias a las funciones
+    strudelEvaluate = strudel.evaluate
+    strudelHush = strudel.hush
+    strudelGetAnalyzerData = strudel.getAnalyzerData
+    strudelGetAudioContext = strudel.getAudioContext
 
-        const drum =
-          sound === 'bd' || sound === 'sd' || sound === 'hh'
-            ? (sound as 'bd' | 'sd' | 'hh')
-            : undefined
+    initialized = true
+    console.log('[StrudelEngine] Initialized successfully')
+  })()
 
-        emitNoteEvent({
-          time,
-          dur: Math.max(dur, 0.01),
-          midi,
-          note,
-          drum: drum ?? (sound === 'unknown' ? undefined : 'other'),
-          instrument: sound
-        })
-      }, false)
-  })
-
-  initialized = true
+  return initPromise
 }
 
 export async function evaluate(code: string): Promise<void> {
-  await ensureInitialized()
-  await initAudio()
-  if (repl) {
-    await repl.evaluate(code, true, true)
+  try {
+    await ensureInitialized()
+    console.log('[StrudelEngine] Evaluating:', code)
+    if (strudelEvaluate) {
+      await strudelEvaluate(code, true)
+      console.log('[StrudelEngine] Evaluation complete')
+    }
+    window.dispatchEvent(new CustomEvent('strudel-play'))
+  } catch (error) {
+    console.error('[StrudelEngine] Evaluation error:', error)
+    throw error
   }
-  window.dispatchEvent(new CustomEvent('strudel-play'))
 }
 
 export function stop(): void {
-  if (repl) {
-    repl.stop()
-    repl.evaluate('hush()', false, false).catch(() => {})
+  console.log('[StrudelEngine] Stopping')
+  if (strudelHush) {
+    strudelHush()
   }
   window.dispatchEvent(new CustomEvent('strudel-stop'))
 }
 
 export function getTime(): number {
   try {
-    return getAudioContext().currentTime
+    if (strudelGetAudioContext) {
+      return strudelGetAudioContext().currentTime
+    }
+    return 0
   } catch {
     return 0
   }
 }
 
-export { getAnalyzerData }
+export function getAnalyzerData(type: 'time' | 'frequency', id: number): Float32Array | null {
+  if (strudelGetAnalyzerData) {
+    return strudelGetAnalyzerData(type, id)
+  }
+  return null
+}
