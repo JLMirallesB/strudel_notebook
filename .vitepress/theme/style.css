@@ -22,36 +22,9 @@ h1, h2, h3, h4, .vp-doc h1, .vp-doc h2, .vp-doc h3 {
   font-family: 'Space Grotesk', sans-serif;
 }
 
-/* Panel de visualizaciones */
-.visualizer-panel {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 180px;
-  background: var(--strudel-bg);
-  border-top: 1px solid var(--vp-c-divider);
-  display: flex;
-  gap: 8px;
-  padding: 8px 16px;
-  z-index: 100;
-  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.1);
-}
-
-.visualizer-panel.hidden {
-  display: none;
-}
-
-.visualizer-panel canvas {
-  flex: 1;
-  height: 100%;
-  border-radius: 8px;
-  background: rgba(15, 118, 110, 0.05);
-}
-
-/* Ajustar contenido para dejar espacio al panel */
+/* Ajustar contenido para dejar espacio al panel de visualizaciones */
 .VPDoc {
-  padding-bottom: 200px !important;
+  padding-bottom: 280px !important;
 }
 
 /* StrudelBox */
@@ -123,34 +96,4 @@ h1, h2, h3, h4, .vp-doc h1, .vp-doc h2, .vp-doc h3 {
 .strudel-box textarea:focus {
   outline: none;
   background: rgba(15, 118, 110, 0.03);
-}
-
-/* Visualizer labels */
-.viz-label {
-  position: absolute;
-  top: 4px;
-  left: 8px;
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--strudel-teal);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.viz-container {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-}
-
-/* Responsive */
-@media (max-width: 768px) {
-  .visualizer-panel {
-    height: 120px;
-    flex-wrap: wrap;
-  }
-
-  .visualizer-panel canvas {
-    min-width: calc(50% - 4px);
-  }
 }
