@@ -6,13 +6,20 @@ const props = defineProps<{
 }>()
 
 const isExpanded = ref(true)
+const activeGroup = ref<'audio' | 'notes'>('audio')
+
+// Canvas refs - Grupo Audio
 const waveformCanvas = ref<HTMLCanvasElement | null>(null)
 const spectrumCanvas = ref<HTMLCanvasElement | null>(null)
 const spectrogramCanvas = ref<HTMLCanvasElement | null>(null)
+
+// Canvas refs - Grupo Notas
+const spiralCanvas = ref<HTMLCanvasElement | null>(null)
+const pitchwheelCanvas = ref<HTMLCanvasElement | null>(null)
 const pianorollCanvas = ref<HTMLCanvasElement | null>(null)
 
 let rafId: number | null = null
-let unsubscribe: (() => void) | null = null
+let cleanupPlayListener: (() => void) | null = null
 
 const MIN_DB = -90
 const MAX_DB = -10
@@ -22,7 +29,6 @@ const AXIS_HEIGHT = 20
 // Eventos de notas para piano roll
 type NoteEvent = { time: number; dur: number; midi?: number }
 let events: NoteEvent[] = []
-let currentCps = 1
 
 // Notas para el piano roll
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
@@ -105,7 +111,7 @@ function drawWaveform(ctx: CanvasRenderingContext2D, data: Float32Array) {
   ctx.fillText('Tiempo', plotX + plotWidth / 2, height - 5)
 }
 
-function drawSpectrum(ctx: CanvasRenderingContext2D, data: Float32Array) {
+function drawSpectrum(ctx: CanvasRenderingContext2D, data: Float32Array, sampleRate: number) {
   const { width, height } = ctx.canvas
   const plotX = AXIS_WIDTH
   const plotWidth = width - AXIS_WIDTH
@@ -149,7 +155,6 @@ function drawSpectrum(ctx: CanvasRenderingContext2D, data: Float32Array) {
   ctx.textAlign = 'center'
   ctx.textBaseline = 'top'
   const freqLabels = [100, 500, 1000, 5000, 10000]
-  const sampleRate = 44100
   const nyquist = sampleRate / 2
 
   for (const freq of freqLabels) {
@@ -192,7 +197,7 @@ function drawSpectrum(ctx: CanvasRenderingContext2D, data: Float32Array) {
   }
 }
 
-function drawSpectrogram(ctx: CanvasRenderingContext2D, data: Float32Array) {
+function drawSpectrogram(ctx: CanvasRenderingContext2D, data: Float32Array, sampleRate: number) {
   const { width, height } = ctx.canvas
   const plotX = AXIS_WIDTH
   const plotWidth = width - AXIS_WIDTH
@@ -214,7 +219,7 @@ function drawSpectrogram(ctx: CanvasRenderingContext2D, data: Float32Array) {
   ctx.textBaseline = 'middle'
 
   const freqLabels = [20000, 10000, 5000, 1000, 500, 100]
-  const nyquist = 22050
+  const nyquist = sampleRate / 2
 
   for (const freq of freqLabels) {
     const y = (1 - freq / nyquist) * plotHeight
@@ -266,14 +271,17 @@ function drawSpectrogram(ctx: CanvasRenderingContext2D, data: Float32Array) {
 }
 
 function drawPianoRoll(ctx: CanvasRenderingContext2D, now: number) {
+  // now está en ciclos (de getSchedulerTime)
   const { width, height } = ctx.canvas
   const plotX = AXIS_WIDTH
   const plotWidth = width - AXIS_WIDTH
   const plotHeight = height - AXIS_HEIGHT
 
-  const secondsPerCycle = 1 / Math.max(currentCps, 0.1)
-  const windowSeconds = secondsPerCycle * 2
-  const timeStart = now - windowSeconds
+  // Ventana de tiempo en ciclos (2 ciclos hacia atrás, 0.5 hacia adelante)
+  const lookbehind = 2
+  const lookahead = 0.5
+  const windowCycles = lookbehind + lookahead
+  const timeStart = now - lookbehind
 
   ctx.clearRect(0, 0, width, height)
 
@@ -281,9 +289,26 @@ function drawPianoRoll(ctx: CanvasRenderingContext2D, now: number) {
   ctx.fillStyle = 'rgba(15, 23, 42, 0.95)'
   ctx.fillRect(plotX, 0, plotWidth, plotHeight)
 
-  // Eje Y (notas)
-  const pitchMin = 48  // C3
-  const pitchMax = 84  // C6
+  // Autorange: calcular min/max MIDI de los eventos visibles
+  const visibleEvents = events.filter(e => e.midi !== undefined)
+  let pitchMin = 48  // C3 default
+  let pitchMax = 84  // C6 default
+
+  if (visibleEvents.length > 0) {
+    const midiValues = visibleEvents.map(e => e.midi!)
+    const minMidi = Math.min(...midiValues)
+    const maxMidi = Math.max(...midiValues)
+    // Añadir margen de una octava
+    pitchMin = Math.max(0, Math.floor((minMidi - 6) / 12) * 12)
+    pitchMax = Math.min(127, Math.ceil((maxMidi + 6) / 12) * 12)
+    // Mínimo rango de 2 octavas
+    if (pitchMax - pitchMin < 24) {
+      const mid = (pitchMin + pitchMax) / 2
+      pitchMin = Math.max(0, Math.floor(mid - 12))
+      pitchMax = Math.min(127, Math.ceil(mid + 12))
+    }
+  }
+
   const pitchRange = pitchMax - pitchMin
 
   ctx.fillStyle = '#94a3b8'
@@ -326,46 +351,62 @@ function drawPianoRoll(ctx: CanvasRenderingContext2D, now: number) {
   ctx.fillText('Nota', 0, 0)
   ctx.restore()
 
-  // Grid vertical (tiempo)
+  // Grid vertical (tiempo) - una línea por cada medio ciclo
   ctx.strokeStyle = 'rgba(148, 163, 184, 0.1)'
-  const steps = 16
-  for (let i = 0; i <= steps; i++) {
-    const x = plotX + (i / steps) * plotWidth
+  const gridLines = Math.ceil(windowCycles * 2)
+  for (let i = 0; i <= gridLines; i++) {
+    const x = plotX + (i / gridLines) * plotWidth
     ctx.beginPath()
     ctx.moveTo(x, 0)
     ctx.lineTo(x, plotHeight)
     ctx.stroke()
   }
 
-  // Filtrar eventos viejos
-  events = events.filter(e => e.time + e.dur >= timeStart - 0.1)
+  // Playhead position (now está en posición relativa a lookbehind/lookahead)
+  const playheadX = plotX + (lookbehind / windowCycles) * plotWidth
 
   // Dibujar notas
   for (const event of events) {
     if (event.midi === undefined) continue
-    const x = plotX + ((event.time - timeStart) / windowSeconds) * plotWidth
-    const w = Math.max((event.dur / windowSeconds) * plotWidth, 4)
+    const x = plotX + ((event.time - timeStart) / windowCycles) * plotWidth
+    const w = Math.max((event.dur / windowCycles) * plotWidth, 4)
     const pitchNorm = Math.min(Math.max((event.midi - pitchMin) / pitchRange, 0), 1)
-    const noteHeight = plotHeight / pitchRange
+    const noteHeight = Math.max(plotHeight / pitchRange, 6)
     const y = plotHeight - pitchNorm * plotHeight - noteHeight / 2
+
+    const isActive = event.time <= now && event.time + event.dur > now
 
     // Color según la nota (arcoíris por octava)
     const hue = (event.midi % 12) * 30
-    ctx.fillStyle = `hsla(${hue}, 70%, 55%, 0.9)`
-    ctx.fillRect(x, y, w, Math.max(noteHeight, 6))
+    ctx.fillStyle = isActive
+      ? `hsla(${hue}, 80%, 60%, 0.95)`
+      : `hsla(${hue}, 60%, 50%, 0.8)`
+    ctx.fillRect(x, y, w, noteHeight)
 
-    // Borde
-    ctx.strokeStyle = `hsla(${hue}, 70%, 40%, 1)`
-    ctx.lineWidth = 1
-    ctx.strokeRect(x, y, w, Math.max(noteHeight, 6))
+    // Borde más visible para notas activas
+    ctx.strokeStyle = isActive
+      ? `hsla(${hue}, 90%, 75%, 1)`
+      : `hsla(${hue}, 70%, 40%, 1)`
+    ctx.lineWidth = isActive ? 2 : 1
+    ctx.strokeRect(x, y, w, noteHeight)
+
+    // Label de la nota (solo si hay espacio suficiente)
+    if (w > 20 && noteHeight > 10) {
+      const noteName = midiToNoteName(event.midi)
+      ctx.fillStyle = isActive ? '#000' : 'rgba(0,0,0,0.7)'
+      ctx.font = `${Math.min(noteHeight * 0.7, 11) * (window.devicePixelRatio || 1)}px sans-serif`
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(noteName, x + 3, y + noteHeight / 2)
+    }
   }
 
-  // Línea "Now"
+  // Línea "Now" (playhead)
   ctx.strokeStyle = '#f59e0b'
   ctx.lineWidth = 2
   ctx.beginPath()
-  ctx.moveTo(width - 2, 0)
-  ctx.lineTo(width - 2, plotHeight)
+  ctx.moveTo(playheadX, 0)
+  ctx.lineTo(playheadX, plotHeight)
   ctx.stroke()
 
   // Etiqueta inferior
@@ -374,37 +415,311 @@ function drawPianoRoll(ctx: CanvasRenderingContext2D, now: number) {
   ctx.fillText('Tiempo →', plotX + plotWidth / 2, height - 5)
 }
 
+// Función auxiliar para coordenadas polares
+function fromPolar(angle: number, radius: number, cx: number, cy: number): [number, number] {
+  const radians = ((angle - 90) * Math.PI) / 180
+  return [cx + Math.cos(radians) * radius, cy + Math.sin(radians) * radius]
+}
+
+function xyOnSpiral(angle: number, margin: number, cx: number, cy: number, rotate: number = 0): [number, number] {
+  return fromPolar((angle + rotate) * 360, margin * angle, cx, cy)
+}
+
+function drawSpiral(ctx: CanvasRenderingContext2D, now: number) {
+  // now está en ciclos (de getSchedulerTime)
+  const { width, height } = ctx.canvas
+
+  ctx.clearRect(0, 0, width, height)
+
+  // Fondo
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.95)'
+  ctx.fillRect(0, 0, width, height)
+
+  const cx = width / 2
+  const cy = height / 2
+  const size = Math.min(width, height) * 0.8
+  const stretch = 1        // rotaciones por ciclo
+  const margin = size / 8  // espacio entre vueltas
+  const inset = 2          // offset inicial (vueltas/ciclos antes del playhead)
+  const thickness = margin * 0.4
+
+  // Ventana de tiempo en ciclos
+  const lookbehind = 4  // 4 ciclos hacia atrás
+  const lookahead = 1   // 1 ciclo hacia adelante
+
+  // Filtrar eventos en la ventana temporal (ya en ciclos)
+  const visibleEvents = events.filter(e =>
+    e.time + e.dur >= now - lookbehind && e.time <= now + lookahead
+  )
+
+  // Dibujar eventos como arcos en la espiral
+  for (const event of visibleEvents) {
+    if (event.midi === undefined) continue
+
+    const isActive = event.time <= now && event.time + event.dur > now
+    // El tiempo ya está en ciclos, así que calculamos directamente
+    const from = (event.time - now) + inset
+    const to = from + event.dur
+
+    // Color basado en la nota
+    const hue = (event.midi % 12) * 30
+    const color = isActive
+      ? `hsla(${hue}, 80%, 60%, 0.95)`
+      : `hsla(${hue}, 50%, 45%, 0.6)`
+
+    ctx.strokeStyle = color
+    ctx.lineWidth = thickness
+    ctx.lineCap = 'round'
+    ctx.beginPath()
+
+    let [sx, sy] = xyOnSpiral(from * stretch, margin, cx, cy, 0)
+    ctx.moveTo(sx, sy)
+
+    const increment = 1 / 60
+    let angle = from
+    while (angle <= to) {
+      const [x, y] = xyOnSpiral(angle * stretch, margin, cx, cy, 0)
+      ctx.lineTo(x, y)
+      angle += increment
+    }
+    ctx.stroke()
+  }
+
+  // Dibujar playhead
+  const playheadAngle = inset
+  ctx.strokeStyle = '#ffffff'
+  ctx.lineWidth = thickness * 0.8
+  ctx.lineCap = 'round'
+  ctx.beginPath()
+  const [px1, py1] = xyOnSpiral((playheadAngle - 0.05) * stretch, margin, cx, cy, 0)
+  const [px2, py2] = xyOnSpiral(playheadAngle * stretch, margin, cx, cy, 0)
+  ctx.moveTo(px1, py1)
+  ctx.lineTo(px2, py2)
+  ctx.stroke()
+
+  // Etiqueta
+  ctx.fillStyle = '#64748b'
+  ctx.font = `${10 * (window.devicePixelRatio || 1)}px sans-serif`
+  ctx.textAlign = 'center'
+  ctx.fillText('Spiral', width / 2, height - 8)
+}
+
+function drawPitchwheel(ctx: CanvasRenderingContext2D, now: number) {
+  const { width, height } = ctx.canvas
+
+  ctx.clearRect(0, 0, width, height)
+
+  // Fondo
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.95)'
+  ctx.fillRect(0, 0, width, height)
+
+  const cx = width / 2
+  const cy = height / 2
+  const size = Math.min(width, height)
+  const radius = size * 0.35
+  const dotRadius = size * 0.025
+  const hapRadius = size * 0.04
+
+  // Nombres de las notas en el círculo
+  const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+
+  // Dibujar los 12 puntos del círculo (semitonos)
+  ctx.fillStyle = '#475569'
+  ctx.font = `${9 * (window.devicePixelRatio || 1)}px sans-serif`
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+
+  for (let i = 0; i < 12; i++) {
+    const angle = (i / 12) * 2 * Math.PI - Math.PI / 2  // Empezar desde arriba (C)
+    const x = cx + Math.cos(angle) * radius
+    const y = cy + Math.sin(angle) * radius
+
+    // Punto base
+    ctx.beginPath()
+    ctx.arc(x, y, dotRadius, 0, 2 * Math.PI)
+    ctx.fill()
+
+    // Etiqueta de nota
+    const labelRadius = radius + dotRadius * 3
+    const lx = cx + Math.cos(angle) * labelRadius
+    const ly = cy + Math.sin(angle) * labelRadius
+    ctx.fillStyle = '#64748b'
+    ctx.fillText(noteNames[i], lx, ly)
+    ctx.fillStyle = '#475569'
+  }
+
+  // Encontrar notas activas
+  const activeNotes = events.filter(e =>
+    e.midi !== undefined && e.time <= now && e.time + e.dur > now
+  )
+
+  // Dibujar líneas al centro y highlights para notas activas
+  for (const note of activeNotes) {
+    if (note.midi === undefined) continue
+
+    const semitone = note.midi % 12
+    const angle = (semitone / 12) * 2 * Math.PI - Math.PI / 2
+    const x = cx + Math.cos(angle) * radius
+    const y = cy + Math.sin(angle) * radius
+
+    const hue = semitone * 30
+
+    // Línea desde el centro
+    ctx.strokeStyle = `hsla(${hue}, 70%, 55%, 0.7)`
+    ctx.lineWidth = hapRadius * 0.6
+    ctx.lineCap = 'round'
+    ctx.beginPath()
+    ctx.moveTo(cx, cy)
+    ctx.lineTo(x, y)
+    ctx.stroke()
+
+    // Círculo highlight
+    ctx.fillStyle = `hsla(${hue}, 70%, 55%, 0.9)`
+    ctx.beginPath()
+    ctx.arc(x, y, hapRadius, 0, 2 * Math.PI)
+    ctx.fill()
+  }
+
+  // Punto central
+  ctx.fillStyle = '#94a3b8'
+  ctx.beginPath()
+  ctx.arc(cx, cy, dotRadius * 0.8, 0, 2 * Math.PI)
+  ctx.fill()
+
+  // Etiqueta
+  ctx.fillStyle = '#64748b'
+  ctx.textAlign = 'center'
+  ctx.fillText('Pitchwheel', width / 2, height - 8)
+}
+
 async function startVisualization() {
   if (rafId !== null) return
 
-  const { getAnalyzerData, getTime, onNoteEvent, ANALYZER_ID } = await import('./audio/engine')
+  const {
+    getAnalyzerData,
+    ANALYZER_ID,
+    getAudioContext,
+    hasAnalyser,
+    queryPattern,
+    getSchedulerTime
+  } = await import('./audio/engine')
 
-  // Suscribirse a eventos de notas
-  unsubscribe = onNoteEvent((event) => {
-    if (event.midi !== undefined) {
-      events.push({ time: event.time, dur: event.dur, midi: event.midi })
+  // Obtener sample rate real del AudioContext
+  const audioContext = getAudioContext()
+  const actualSampleRate = audioContext?.sampleRate ?? 44100
+  console.log(`[VisualizerPanel] Using sample rate: ${actualSampleRate} Hz`)
+
+  // Limpiar espectrograma cuando inicia nueva reproducción
+  const handlePlay = () => {
+    clearSpectrogram()
+  }
+  window.addEventListener('strudel-play', handlePlay)
+  cleanupPlayListener = () => {
+    window.removeEventListener('strudel-play', handlePlay)
+  }
+
+  // Función helper para convertir haps de Strudel al formato de eventos
+  function hapsToEvents(haps: any[]): NoteEvent[] {
+    const result: NoteEvent[] = []
+    for (const hap of haps) {
+      if (!hap.value) continue
+      const time = hap.whole?.begin?.valueOf() ?? 0
+      const end = hap.whole?.end?.valueOf() ?? time
+      const dur = end - time
+
+      // Obtener MIDI de diferentes fuentes
+      let midi: number | undefined
+      const value = hap.value
+
+      if (value.note !== undefined) {
+        // Nota como string "c3" o número
+        if (typeof value.note === 'number') {
+          midi = value.note
+        } else if (typeof value.note === 'string') {
+          midi = noteNameToMidi(value.note)
+        }
+      } else if (value.n !== undefined && typeof value.n === 'number') {
+        // Si es un instrumento tonal (no drum), usar n como MIDI
+        const drums = ['bd', 'sd', 'hh', 'cp', 'oh', 'ch']
+        if (!drums.includes(value.s)) {
+          midi = value.n
+        }
+      } else if (value.freq !== undefined) {
+        // Frecuencia a MIDI
+        midi = Math.round(69 + 12 * Math.log2(Number(value.freq) / 440))
+      }
+
+      if (midi !== undefined) {
+        result.push({ time, dur, midi })
+      }
     }
-  })
+    return result
+  }
+
+  // Helper para convertir nombre de nota a MIDI (simple)
+  function noteNameToMidi(note: string): number | undefined {
+    const match = note.trim().match(/^([a-gA-G])([#b]?)(-?\d+)$/)
+    if (!match) return undefined
+    const noteMap: Record<string, number> = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 }
+    const letter = match[1].toLowerCase()
+    const accidental = match[2]
+    const octave = parseInt(match[3], 10)
+    const base = noteMap[letter]
+    if (base === undefined || isNaN(octave)) return undefined
+    const offset = accidental === '#' ? 1 : accidental === 'b' ? -1 : 0
+    return (octave + 1) * 12 + base + offset
+  }
+
+  // Variables para query de pattern
+  const LOOKBEHIND = 2  // Ciclos hacia atrás
+  const LOOKAHEAD = 2   // Ciclos hacia adelante
 
   function draw() {
-    const wCtx = waveformCanvas.value?.getContext('2d')
-    const sCtx = spectrumCanvas.value?.getContext('2d')
-    const sgCtx = spectrogramCanvas.value?.getContext('2d')
-    const prCtx = pianorollCanvas.value?.getContext('2d')
+    if (activeGroup.value === 'audio') {
+      // Grupo Audio: Waveform, Spectrum, Spectrogram
+      const wCtx = waveformCanvas.value?.getContext('2d')
+      const sCtx = spectrumCanvas.value?.getContext('2d')
+      const sgCtx = spectrogramCanvas.value?.getContext('2d')
 
-    if (waveformCanvas.value) resizeCanvas(waveformCanvas.value)
-    if (spectrumCanvas.value) resizeCanvas(spectrumCanvas.value)
-    if (spectrogramCanvas.value) resizeCanvas(spectrogramCanvas.value)
-    if (pianorollCanvas.value) resizeCanvas(pianorollCanvas.value)
+      if (waveformCanvas.value) resizeCanvas(waveformCanvas.value)
+      if (spectrumCanvas.value) resizeCanvas(spectrumCanvas.value)
+      if (spectrogramCanvas.value) resizeCanvas(spectrogramCanvas.value)
 
-    const timeData = getAnalyzerData('time', ANALYZER_ID)
-    const freqData = getAnalyzerData('frequency', ANALYZER_ID)
-    const now = getTime()
+      // Verificar que existe el analyzer antes de obtener datos
+      if (hasAnalyser(ANALYZER_ID)) {
+        const timeData = getAnalyzerData('time', ANALYZER_ID)
+        const freqData = getAnalyzerData('frequency', ANALYZER_ID)
 
-    if (wCtx && timeData) drawWaveform(wCtx, timeData)
-    if (sCtx && freqData) drawSpectrum(sCtx, freqData)
-    if (sgCtx && freqData) drawSpectrogram(sgCtx, freqData)
-    if (prCtx) drawPianoRoll(prCtx, now)
+        if (wCtx && timeData) drawWaveform(wCtx, timeData)
+        if (sCtx && freqData) drawSpectrum(sCtx, freqData, actualSampleRate)
+        if (sgCtx && freqData) drawSpectrogram(sgCtx, freqData, actualSampleRate)
+      } else {
+        // Dibujar fondos vacíos con mensaje
+        if (wCtx) drawEmptyCanvas(wCtx, 'Esperando audio...')
+        if (sCtx) drawEmptyCanvas(sCtx, 'Esperando audio...')
+        if (sgCtx) drawEmptyCanvas(sgCtx, 'Esperando audio...')
+      }
+    } else {
+      // Grupo Notas: Spiral, Pitchwheel, Piano Roll
+      const spCtx = spiralCanvas.value?.getContext('2d')
+      const pwCtx = pitchwheelCanvas.value?.getContext('2d')
+      const prCtx = pianorollCanvas.value?.getContext('2d')
+
+      if (spiralCanvas.value) resizeCanvas(spiralCanvas.value)
+      if (pitchwheelCanvas.value) resizeCanvas(pitchwheelCanvas.value)
+      if (pianorollCanvas.value) resizeCanvas(pianorollCanvas.value)
+
+      // Obtener tiempo actual del scheduler (en ciclos)
+      const now = getSchedulerTime()
+
+      // Query al pattern activo para obtener haps
+      const haps = queryPattern(now - LOOKBEHIND, now + LOOKAHEAD)
+      events = hapsToEvents(haps)
+
+      if (spCtx) drawSpiral(spCtx, now)
+      if (pwCtx) drawPitchwheel(pwCtx, now)
+      if (prCtx) drawPianoRoll(prCtx, now)
+    }
 
     rafId = requestAnimationFrame(draw)
   }
@@ -412,14 +727,26 @@ async function startVisualization() {
   rafId = requestAnimationFrame(draw)
 }
 
+function drawEmptyCanvas(ctx: CanvasRenderingContext2D, message: string) {
+  const { width, height } = ctx.canvas
+  ctx.clearRect(0, 0, width, height)
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.95)'
+  ctx.fillRect(0, 0, width, height)
+  ctx.fillStyle = '#475569'
+  ctx.font = `${12 * (window.devicePixelRatio || 1)}px sans-serif`
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(message, width / 2, height / 2)
+}
+
 function stopVisualization() {
   if (rafId !== null) {
     cancelAnimationFrame(rafId)
     rafId = null
   }
-  if (unsubscribe) {
-    unsubscribe()
-    unsubscribe = null
+  if (cleanupPlayListener) {
+    cleanupPlayListener()
+    cleanupPlayListener = null
   }
   events = []
 }
@@ -451,9 +778,29 @@ onUnmounted(() => {
 <template>
   <div class="visualizer-panel" :class="{ hidden: !visible, collapsed: !isExpanded }">
     <div class="viz-header">
-      <span class="viz-title">Visualizaciones</span>
+      <div class="viz-tabs">
+        <button
+          class="viz-tab"
+          :class="{ active: activeGroup === 'audio' }"
+          @click="activeGroup = 'audio'"
+        >
+          Audio
+        </button>
+        <button
+          class="viz-tab"
+          :class="{ active: activeGroup === 'notes' }"
+          @click="activeGroup = 'notes'"
+        >
+          Notas
+        </button>
+      </div>
       <div class="viz-controls">
-        <button class="viz-btn" @click="clearSpectrogram" title="Limpiar espectrograma">
+        <button
+          v-if="activeGroup === 'audio'"
+          class="viz-btn"
+          @click="clearSpectrogram"
+          title="Limpiar espectrograma"
+        >
           Limpiar
         </button>
         <button class="viz-btn" @click="toggleExpand">
@@ -462,22 +809,36 @@ onUnmounted(() => {
       </div>
     </div>
     <div class="viz-content" v-show="isExpanded">
-      <div class="viz-container">
-        <span class="viz-label">Waveform</span>
-        <canvas ref="waveformCanvas"></canvas>
-      </div>
-      <div class="viz-container">
-        <span class="viz-label">Spectrum</span>
-        <canvas ref="spectrumCanvas"></canvas>
-      </div>
-      <div class="viz-container">
-        <span class="viz-label">Spectrogram</span>
-        <canvas ref="spectrogramCanvas"></canvas>
-      </div>
-      <div class="viz-container" style="flex: 1.5">
-        <span class="viz-label">Piano Roll</span>
-        <canvas ref="pianorollCanvas"></canvas>
-      </div>
+      <!-- Grupo Audio -->
+      <template v-if="activeGroup === 'audio'">
+        <div class="viz-container">
+          <span class="viz-label">Waveform</span>
+          <canvas ref="waveformCanvas"></canvas>
+        </div>
+        <div class="viz-container">
+          <span class="viz-label">Spectrum</span>
+          <canvas ref="spectrumCanvas"></canvas>
+        </div>
+        <div class="viz-container">
+          <span class="viz-label">Spectrogram</span>
+          <canvas ref="spectrogramCanvas"></canvas>
+        </div>
+      </template>
+      <!-- Grupo Notas -->
+      <template v-else>
+        <div class="viz-container">
+          <span class="viz-label">Spiral</span>
+          <canvas ref="spiralCanvas"></canvas>
+        </div>
+        <div class="viz-container">
+          <span class="viz-label">Pitchwheel</span>
+          <canvas ref="pitchwheelCanvas"></canvas>
+        </div>
+        <div class="viz-container" style="flex: 1.5">
+          <span class="viz-label">Piano Roll</span>
+          <canvas ref="pianorollCanvas"></canvas>
+        </div>
+      </template>
     </div>
   </div>
 </template>
@@ -507,16 +868,36 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 16px;
+  padding: 6px 16px;
   background: #1e293b;
   border-bottom: 1px solid #334155;
 }
 
-.viz-title {
-  font-family: 'Space Grotesk', sans-serif;
-  font-weight: 600;
+.viz-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.viz-tab {
+  padding: 6px 16px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: #94a3b8;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.viz-tab:hover {
+  background: #334155;
   color: #e2e8f0;
-  font-size: 14px;
+}
+
+.viz-tab.active {
+  background: #3b82f6;
+  color: #ffffff;
 }
 
 .viz-controls {
