@@ -687,7 +687,11 @@ async function startVisualization() {
 
       // Verificar que existe el analyzer antes de obtener datos
       if (hasAnalyser(ANALYZER_ID)) {
-        const timeData = getAnalyzerData('time', ANALYZER_ID)
+        // IMPORTANTE: Strudel usa un buffer compartido para time y frequency data.
+        // Debemos copiar los datos de tiempo antes de obtener los de frecuencia,
+        // ya que el segundo sobrescribiría el primero.
+        const timeDataRaw = getAnalyzerData('time', ANALYZER_ID)
+        const timeData = timeDataRaw ? new Float32Array(timeDataRaw) : null
         const freqData = getAnalyzerData('frequency', ANALYZER_ID)
 
         if (wCtx && timeData) drawWaveform(wCtx, timeData)
