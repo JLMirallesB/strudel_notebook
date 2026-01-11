@@ -55,6 +55,17 @@ Panel fijo inferior con 4 visualizaciones:
 ### AudioEngine (Singleton)
 Ubicado en `.vitepress/components/audio/engine.ts`. Usa `initStrudel()` para inicializar correctamente el motor de audio.
 
+#### Samples
+El engine carga automáticamente los sample maps de [dough-samples](https://github.com/felixroos/dough-samples) al inicializar:
+- `tidal-drum-machines.json` - Drums (bd, sd, hh, etc.)
+- `piano.json` - Piano
+- `vcsl.json` - Instrumentos orquestales
+- `Dirt-Samples.json` - Samples clásicos de Tidal
+- `EmuSP12.json` - EMU SP-12 drum machine
+- `mridangam.json` - Mridangam
+
+Los archivos de audio se descargan bajo demanda desde GitHub cuando se usan por primera vez. El componente StrudelBox muestra una barra de progreso durante la carga inicial de los JSONs (~5MB).
+
 ## Crear Nuevas Lecciones
 
 1. Copiar `lessons/_plantilla.md` con nuevo nombre (ej: `05-sampling.md`)

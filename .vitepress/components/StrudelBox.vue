@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 
 const props = defineProps<{
   code?: string
@@ -12,8 +12,16 @@ const isLoading = ref(false)
 const errorMessage = ref('')
 const codeContent = ref('')
 
+// Estado de carga de samples
+const samplesLoading = ref(false)
+const samplesLoaded = ref(0)
+const samplesTotal = ref(0)
+const currentSampleFile = ref('')
+
+let unsubscribeLoading: (() => void) | null = null
+
 // Extraer código del slot default
-onMounted(() => {
+onMounted(async () => {
   if (props.code) {
     codeContent.value = props.code.trim()
   } else if (slots.default) {
@@ -21,6 +29,25 @@ onMounted(() => {
     if (slotContent[0]?.children) {
       codeContent.value = String(slotContent[0].children).trim()
     }
+  }
+
+  // Suscribirse al estado de carga de samples
+  try {
+    const { onLoadingStateChange } = await import('./audio/engine')
+    unsubscribeLoading = onLoadingStateChange((state) => {
+      samplesLoading.value = state.isLoading
+      samplesLoaded.value = state.loaded
+      samplesTotal.value = state.total
+      currentSampleFile.value = state.currentFile
+    })
+  } catch (e) {
+    // SSR - ignorar
+  }
+})
+
+onUnmounted(() => {
+  if (unsubscribeLoading) {
+    unsubscribeLoading()
   }
 })
 
@@ -72,8 +99,16 @@ async function stop() {
 
 <template>
   <div class="strudel-box" :class="{ 'is-active': isActive, 'has-error': errorMessage }">
+    <!-- Barra de progreso de carga de samples -->
+    <div v-if="samplesLoading" class="loading-bar">
+      <div class="loading-bar-progress" :style="{ width: `${(samplesLoaded / samplesTotal) * 100}%` }"></div>
+      <span class="loading-bar-text">
+        Cargando samples ({{ samplesLoaded }}/{{ samplesTotal }})
+        <span v-if="currentSampleFile" class="loading-file">{{ currentSampleFile }}</span>
+      </span>
+    </div>
     <div class="strudel-box-header">
-      <button class="play-btn" @click="play" :disabled="isLoading">
+      <button class="play-btn" @click="play" :disabled="isLoading || samplesLoading">
         {{ isLoading ? '⏳' : '▶' }} Play
       </button>
       <button class="stop-btn" @click="stop">■ Stop</button>
@@ -92,6 +127,41 @@ async function stop() {
 </template>
 
 <style scoped>
+.loading-bar {
+  position: relative;
+  height: 24px;
+  background: #1a1a2e;
+  border-radius: 4px 4px 0 0;
+  overflow: hidden;
+}
+
+.loading-bar-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: linear-gradient(90deg, #4f46e5, #7c3aed);
+  transition: width 0.3s ease;
+}
+
+.loading-bar-text {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 0.75rem;
+  color: #e0e0e0;
+  z-index: 1;
+  gap: 0.5rem;
+}
+
+.loading-file {
+  opacity: 0.7;
+  font-family: monospace;
+  font-size: 0.7rem;
+}
+
 .has-error textarea {
   border-color: #ef4444;
 }

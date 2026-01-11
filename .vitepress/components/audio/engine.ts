@@ -72,12 +72,61 @@ function freqToMidi(freq: number): number {
 let initialized = false
 let initPromise: Promise<void> | null = null
 
+// Estado de carga de samples (para UI)
+export type LoadingState = {
+  isLoading: boolean
+  loaded: number
+  total: number
+  currentFile: string
+}
+
+let loadingState: LoadingState = {
+  isLoading: false,
+  loaded: 0,
+  total: 0,
+  currentFile: '',
+}
+
+type LoadingCallback = (state: LoadingState) => void
+const loadingListeners: LoadingCallback[] = []
+
+function updateLoadingState(partial: Partial<LoadingState>) {
+  loadingState = { ...loadingState, ...partial }
+  loadingListeners.forEach(fn => fn(loadingState))
+}
+
+export function onLoadingStateChange(callback: LoadingCallback): () => void {
+  loadingListeners.push(callback)
+  // Llamar inmediatamente con el estado actual
+  callback(loadingState)
+  return () => {
+    const idx = loadingListeners.indexOf(callback)
+    if (idx >= 0) loadingListeners.splice(idx, 1)
+  }
+}
+
+export function getLoadingState(): LoadingState {
+  return loadingState
+}
+
 // Referencia dinámica a las funciones de Strudel
 let strudelEvaluate: ((code: string, autoplay?: boolean) => Promise<unknown>) | null = null
 let strudelHush: (() => void) | null = null
 let strudelGetAnalyzerData: ((type: string, id: number) => Float32Array | null) | null = null
 let strudelGetAudioContext: (() => AudioContext) | null = null
+let strudelSamples: ((url: string) => Promise<void>) | null = null
 let strudelRepl: any = null
+
+// URLs de los sample maps de dough-samples (mismos que usa strudel.cc)
+const SAMPLE_MAP_BASE = 'https://raw.githubusercontent.com/felixroos/dough-samples/main/'
+const SAMPLE_MAPS = [
+  'tidal-drum-machines.json',
+  'piano.json',
+  'vcsl.json',
+  'Dirt-Samples.json',
+  'EmuSP12.json',
+  'mridangam.json',
+]
 
 // Cache del AudioContext para evitar llamadas repetidas
 let cachedAudioContext: AudioContext | null = null
@@ -98,10 +147,37 @@ async function ensureInitialized(): Promise<void> {
     strudelHush = strudel.hush
     strudelGetAnalyzerData = strudel.getAnalyzerData
     strudelGetAudioContext = strudel.getAudioContext
+    strudelSamples = strudel.samples
 
     // Cachear AudioContext
     if (strudelGetAudioContext) {
       cachedAudioContext = strudelGetAudioContext()
+    }
+
+    // Cargar sample maps (secuencialmente para mostrar progreso)
+    if (strudelSamples) {
+      console.log('[StrudelEngine] Loading sample maps...')
+      updateLoadingState({
+        isLoading: true,
+        loaded: 0,
+        total: SAMPLE_MAPS.length,
+        currentFile: '',
+      })
+
+      for (let i = 0; i < SAMPLE_MAPS.length; i++) {
+        const mapFile = SAMPLE_MAPS[i]
+        updateLoadingState({ currentFile: mapFile })
+        try {
+          await strudelSamples!(SAMPLE_MAP_BASE + mapFile)
+          console.log(`[StrudelEngine] Loaded ${mapFile}`)
+        } catch (error) {
+          console.warn(`[StrudelEngine] Failed to load ${mapFile}:`, error)
+        }
+        updateLoadingState({ loaded: i + 1 })
+      }
+
+      updateLoadingState({ isLoading: false, currentFile: '' })
+      console.log('[StrudelEngine] Sample maps loaded')
     }
 
     initialized = true
