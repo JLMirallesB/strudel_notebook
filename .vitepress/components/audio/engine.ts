@@ -358,3 +358,141 @@ export function getCps(): number {
   }
   return 1
 }
+
+// ============================================
+// Sistema de highlight en tiempo real
+// ============================================
+
+export type HighlightLocation = {
+  start: number
+  end: number
+}
+
+export type HighlightEvent = {
+  locations: HighlightLocation[]
+  time: number
+}
+
+type HighlightCallback = (event: HighlightEvent) => void
+const highlightListeners: HighlightCallback[] = []
+let highlightAnimationFrame: number | null = null
+let lastHighlightedLocations: string = ''
+
+/**
+ * Suscribirse a eventos de highlight.
+ * Se llama con las ubicaciones de los elementos que están sonando.
+ */
+export function onHighlightEvent(callback: HighlightCallback): () => void {
+  highlightListeners.push(callback)
+  return () => {
+    const idx = highlightListeners.indexOf(callback)
+    if (idx >= 0) highlightListeners.splice(idx, 1)
+  }
+}
+
+function emitHighlightEvent(locations: HighlightLocation[]) {
+  // Evitar emitir eventos duplicados
+  const locKey = JSON.stringify(locations)
+  if (locKey === lastHighlightedLocations) return
+  lastHighlightedLocations = locKey
+
+  const event: HighlightEvent = {
+    locations,
+    time: getSchedulerTime(),
+  }
+  highlightListeners.forEach(fn => {
+    try {
+      fn(event)
+    } catch (error) {
+      console.error('[StrudelEngine] Error in highlight listener:', error)
+    }
+  })
+}
+
+function pollHighlights() {
+  if (!strudelRepl?.scheduler?.started) {
+    // Si el scheduler no está corriendo, limpiar highlights
+    if (lastHighlightedLocations !== '[]') {
+      emitHighlightEvent([])
+    }
+    highlightAnimationFrame = requestAnimationFrame(pollHighlights)
+    return
+  }
+
+  const currentTime = getSchedulerTime()
+  const pattern = getActivePattern()
+
+  if (!pattern) {
+    emitHighlightEvent([])
+    highlightAnimationFrame = requestAnimationFrame(pollHighlights)
+    return
+  }
+
+  try {
+    // Query haps en una ventana pequeña alrededor del tiempo actual
+    const haps = pattern.queryArc(currentTime, currentTime + 0.05)
+    const locations: HighlightLocation[] = []
+
+    for (const hap of haps) {
+      // Verificar si el hap está activo ahora
+      const hapStart = hap.whole?.begin?.valueOf() ?? 0
+      const hapEnd = hap.whole?.end?.valueOf() ?? 0
+
+      if (hapStart <= currentTime && hapEnd > currentTime) {
+        // Debug: ver estructura del hap
+        if (!debugLoggedHap) {
+          console.log('[StrudelEngine] Hap structure:', {
+            value: hap.value,
+            context: hap.context,
+            whole: { begin: hapStart, end: hapEnd },
+          })
+          debugLoggedHap = true
+        }
+
+        // Extraer ubicaciones del contexto
+        const hapLocations = hap.context?.locations
+        if (Array.isArray(hapLocations) && hapLocations.length > 0) {
+          for (const loc of hapLocations) {
+            if (typeof loc.start === 'number' && typeof loc.end === 'number') {
+              // Evitar duplicados
+              const exists = locations.some(l => l.start === loc.start && l.end === loc.end)
+              if (!exists) {
+                locations.push({ start: loc.start, end: loc.end })
+              }
+            }
+          }
+        }
+      }
+    }
+
+    emitHighlightEvent(locations)
+  } catch (error) {
+    console.error('[StrudelEngine] Error in pollHighlights:', error)
+  }
+
+  highlightAnimationFrame = requestAnimationFrame(pollHighlights)
+}
+
+// Iniciar/detener el polling de highlights
+function startHighlightPolling() {
+  if (highlightAnimationFrame === null) {
+    highlightAnimationFrame = requestAnimationFrame(pollHighlights)
+  }
+}
+
+function stopHighlightPolling() {
+  if (highlightAnimationFrame !== null) {
+    cancelAnimationFrame(highlightAnimationFrame)
+    highlightAnimationFrame = null
+  }
+  emitHighlightEvent([])
+  lastHighlightedLocations = ''
+}
+
+// Escuchar eventos de play/stop para controlar el polling
+if (typeof window !== 'undefined') {
+  window.addEventListener('strudel-play', startHighlightPolling)
+  window.addEventListener('strudel-stop', () => {
+    stopHighlightPolling()
+  })
+}
