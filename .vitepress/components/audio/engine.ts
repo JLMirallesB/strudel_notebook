@@ -171,26 +171,12 @@ async function ensureInitialized(): Promise<void> {
       sliderWithID: (_id: string, value: number) => value,
     })
 
-    // Cachear AudioContext y forzar resume
+    // Inicializar audio: resume AudioContext + cargar AudioWorklets
+    await strudel.initAudio()
+
+    // Cachear AudioContext
     if (strudelGetAudioContext) {
       cachedAudioContext = strudelGetAudioContext()
-      console.log('[StrudelEngine] AudioContext state:', cachedAudioContext.state, 'sampleRate:', cachedAudioContext.sampleRate)
-      if (cachedAudioContext.state === 'suspended') {
-        console.log('[StrudelEngine] Resuming AudioContext...')
-        await cachedAudioContext.resume()
-        console.log('[StrudelEngine] AudioContext resumed, state:', cachedAudioContext.state)
-      }
-    } else {
-      console.warn('[StrudelEngine] getAudioContext not available')
-    }
-
-    // Forzar carga de AudioWorklets (superdough) con nota silenciosa
-    try {
-      console.log('[StrudelEngine] Pre-loading AudioWorklets...')
-      await strudelEvaluate!('silence', false)
-      console.log('[StrudelEngine] AudioWorklets pre-loaded')
-    } catch (e) {
-      console.warn('[StrudelEngine] AudioWorklet pre-load failed:', e)
     }
 
     // Cargar sample maps (secuencialmente para mostrar progreso)
@@ -267,11 +253,8 @@ export async function evaluate(code: string): Promise<void> {
   try {
     await ensureInitialized()
     const ctx = strudelGetAudioContext ? strudelGetAudioContext() : cachedAudioContext
-    console.log('[StrudelEngine] AudioContext before eval:', ctx?.state, 'destination:', ctx?.destination?.numberOfInputs)
     if (ctx?.state === 'suspended') {
-      console.log('[StrudelEngine] Resuming AudioContext before eval...')
       await ctx.resume()
-      console.log('[StrudelEngine] Resumed:', ctx.state)
     }
     console.log('[StrudelEngine] Evaluating:', code)
     if (strudelEvaluate) {
