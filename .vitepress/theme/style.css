@@ -67,14 +67,34 @@ h1, h2, h3, h4, .vp-doc h1, .vp-doc h2, .vp-doc h3 {
   color: var(--strudel-teal);
 }
 
-.strudel-box-header .stop-btn {
+.strudel-box-header .stop-btn,
+.strudel-box-header .reload-btn,
+.strudel-box-header .code-toggle-btn {
   background: rgba(255, 255, 255, 0.2);
   color: white;
 }
 
-.strudel-box-header .reload-btn {
+.strudel-box-header .rec-toggle-btn {
   background: rgba(255, 255, 255, 0.2);
   color: white;
+  font-size: 11px;
+}
+
+.strudel-box-header .rec-toggle-btn.is-armed {
+  background: #f59e0b;
+  color: #000;
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
+.strudel-box-header .rec-toggle-btn.is-recording {
+  background: #ef4444;
+  color: white;
+  animation: rec-pulse 1s ease-in-out infinite;
+}
+
+@keyframes rec-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
 }
 
 .strudel-box-header .focus-btn {

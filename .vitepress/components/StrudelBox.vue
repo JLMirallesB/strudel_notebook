@@ -13,8 +13,20 @@ const highlightRef = ref<HTMLDivElement | null>(null)
 const isActive = ref(false)
 const isLoading = ref(false)
 const isFocused = ref(false)
+const copied = ref(false)
 const errorMessage = ref('')
 const codeContent = ref('')
+
+// Menus
+const showRecMenu = ref(false)
+const showCodeMenu = ref(false)
+const midiCycles = ref(4)
+
+// Recording state
+type RecMode = 'midi' | 'audio' | null
+type RecState = 'idle' | 'armed' | 'recording'
+const recMode = ref<RecMode>(null)
+const recState = ref<RecState>('idle')
 
 // Estado de carga de samples
 const samplesLoading = ref(false)
@@ -31,12 +43,10 @@ const widgets = ref<SliderWidget[]>([])
 let unsubscribeLoading: (() => void) | null = null
 let unsubscribeHighlight: (() => void) | null = null
 
-// Código con syntax highlighting
 const highlightedCode = computed(() => {
   return highlightStrudel(codeContent.value)
 })
 
-// Actualizar clases de highlight activo cuando cambian las ubicaciones
 watch([activeLocations, highlightRef], () => {
   if (!highlightRef.value || !isActive.value) return
   updateActiveHighlights()
@@ -44,19 +54,14 @@ watch([activeLocations, highlightRef], () => {
 
 function updateActiveHighlights() {
   if (!highlightRef.value) return
-
   highlightRef.value.querySelectorAll('.hl-active').forEach(el => {
     el.classList.remove('hl-active')
   })
-
   if (activeLocations.value.length === 0) return
-
   const spans = highlightRef.value.querySelectorAll('[data-start][data-end]')
-
   for (const span of spans) {
     const spanStart = parseInt(span.getAttribute('data-start') || '0', 10)
     const spanEnd = parseInt(span.getAttribute('data-end') || '0', 10)
-
     for (const loc of activeLocations.value) {
       if (spanStart < loc.end && spanEnd > loc.start) {
         span.classList.add('hl-active')
@@ -64,6 +69,120 @@ function updateActiveHighlights() {
       }
     }
   }
+}
+
+function addAnalyzer(code: string): string {
+  return code.includes('.analyze(') ? code : code.trim() + '.analyze(1)'
+}
+
+// --- Recording ---
+function armRecording(mode: RecMode) {
+  recMode.value = mode
+  if (isActive.value) {
+    startRecordingNow()
+  } else {
+    recState.value = 'armed'
+  }
+  showRecMenu.value = false
+}
+
+async function startRecordingNow() {
+  const engine = await import('./audio/engine')
+  recState.value = 'recording'
+  if (recMode.value === 'midi') {
+    engine.startRecording()
+  } else if (recMode.value === 'audio') {
+    await engine.startAudioRecording()
+  }
+}
+
+async function stopRecordingAndDownload() {
+  const engine = await import('./audio/engine')
+  if (recMode.value === 'midi') {
+    const { haps, duration, cps } = engine.stopRecording()
+    const { downloadMidi } = await import('./midi-export')
+    downloadMidi(haps, duration, cps)
+  } else if (recMode.value === 'audio') {
+    engine.stopAudioRecording()
+  }
+  recState.value = 'idle'
+  recMode.value = null
+}
+
+function cancelRecording() {
+  recState.value = 'idle'
+  recMode.value = null
+}
+
+async function handleRecButton() {
+  if (recState.value === 'recording') {
+    await stopRecordingAndDownload()
+  } else if (recState.value === 'armed') {
+    cancelRecording()
+  } else {
+    showRecMenu.value = !showRecMenu.value
+  }
+}
+
+async function exportMidiCycles() {
+  try {
+    const { queryPattern, getCps } = await import('./audio/engine')
+    const { downloadMidi } = await import('./midi-export')
+    const haps = queryPattern(0, midiCycles.value)
+    downloadMidi(haps, midiCycles.value, getCps())
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : String(error)
+  }
+  showRecMenu.value = false
+}
+
+// --- Play / Stop / Reload ---
+async function play() {
+  errorMessage.value = ''
+  isLoading.value = true
+
+  try {
+    const engine = await import('./audio/engine')
+    engine.resumeAudio()
+    engine.stop()
+
+    document.querySelectorAll('.strudel-box').forEach(box => {
+      box.classList.remove('is-active')
+    })
+
+    const code = textareaRef.value?.value || codeContent.value
+    await engine.evaluate(addAnalyzer(code))
+    widgets.value = engine.getWidgets()
+    isActive.value = true
+
+    if (recState.value === 'armed') {
+      await startRecordingNow()
+    }
+  } catch (error) {
+    console.error('[StrudelBox] Play error:', error)
+    errorMessage.value = error instanceof Error ? error.message : String(error)
+    isActive.value = false
+  } finally {
+    isLoading.value = false
+  }
+}
+
+async function stop() {
+  if (recState.value === 'recording') {
+    await stopRecordingAndDownload()
+  } else {
+    cancelRecording()
+  }
+  try {
+    const { stop: engineStop } = await import('./audio/engine')
+    engineStop()
+  } catch (error) {
+    console.error('[StrudelBox] Stop error:', error)
+  }
+  isActive.value = false
+  errorMessage.value = ''
+  activeLocations.value = []
+  widgets.value = []
 }
 
 async function reload() {
@@ -79,15 +198,58 @@ async function reload() {
   }
 }
 
-function toggleFocus() {
-  isFocused.value = !isFocused.value
-  if (isFocused.value) {
-    document.body.style.overflow = 'hidden'
-  } else {
-    document.body.style.overflow = ''
+// --- Code export ---
+async function copyCode() {
+  try {
+    await navigator.clipboard.writeText(codeContent.value)
+    copied.value = true
+    setTimeout(() => { copied.value = false }, 1500)
+  } catch {
+    downloadCode()
+  }
+  showCodeMenu.value = false
+}
+
+function downloadCode() {
+  const blob = new Blob([codeContent.value], { type: 'text/plain' })
+  const link = document.createElement('a')
+  link.download = `strudel-${Date.now()}.txt`
+  link.href = URL.createObjectURL(blob)
+  link.click()
+  URL.revokeObjectURL(link.href)
+  showCodeMenu.value = false
+}
+
+// --- Widgets ---
+function widgetLabel(widget: SliderWidget): string {
+  const before = codeContent.value.slice(0, widget.from)
+  const match = before.match(/\.(\w+)\s*\(\s*$/)
+  if (match) return match[1]
+  const funcMatch = before.match(/(\w+)\s*\(\s*$/)
+  if (funcMatch) return funcMatch[1]
+  return 'slider'
+}
+
+async function handleSliderChange(widget: SliderWidget, newValue: number) {
+  const newValueStr = String(newValue)
+  const code = codeContent.value
+  codeContent.value = code.slice(0, widget.from) + newValueStr + code.slice(widget.to)
+  try {
+    const { reEvaluate, getWidgets } = await import('./audio/engine')
+    await reEvaluate(addAnalyzer(codeContent.value))
+    widgets.value = getWidgets()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : String(error)
   }
 }
 
+// --- Focus ---
+function toggleFocus() {
+  isFocused.value = !isFocused.value
+  document.body.style.overflow = isFocused.value ? 'hidden' : ''
+}
+
+// --- Keyboard ---
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape' && isFocused.value) {
     e.preventDefault()
@@ -102,7 +264,6 @@ function handleKeydown(e: KeyboardEvent) {
   }
 }
 
-// Sincronizar scroll entre textarea y highlight
 function syncScroll() {
   if (textareaRef.value && highlightRef.value) {
     highlightRef.value.scrollTop = textareaRef.value.scrollTop
@@ -110,7 +271,13 @@ function syncScroll() {
   }
 }
 
-// Extraer código del slot default
+// Close menus on outside click
+function closeMenus(e: Event) {
+  const target = e.target as HTMLElement
+  if (!target.closest('.rec-menu-wrap')) showRecMenu.value = false
+  if (!target.closest('.code-menu-wrap')) showCodeMenu.value = false
+}
+
 onMounted(async () => {
   if (props.code) {
     codeContent.value = props.code.trim()
@@ -121,10 +288,10 @@ onMounted(async () => {
     }
   }
 
-  // Suscribirse al estado de carga e iniciar carga anticipada
+  document.addEventListener('click', closeMenus)
+
   try {
     const engine = await import('./audio/engine')
-
     engine.beginInitialization()
 
     unsubscribeLoading = engine.onLoadingStateChange((state) => {
@@ -140,93 +307,20 @@ onMounted(async () => {
       }
     })
   } catch (e) {
-    // SSR - ignorar
+    // SSR
   }
 })
 
 onUnmounted(() => {
   document.body.style.overflow = ''
-  if (unsubscribeLoading) {
-    unsubscribeLoading()
-  }
-  if (unsubscribeHighlight) {
-    unsubscribeHighlight()
-  }
+  document.removeEventListener('click', closeMenus)
+  if (unsubscribeLoading) unsubscribeLoading()
+  if (unsubscribeHighlight) unsubscribeHighlight()
 })
-
-function addAnalyzer(code: string): string {
-  return code.includes('.analyze(') ? code : code.trim() + '.analyze(1)'
-}
-
-async function play() {
-  errorMessage.value = ''
-  isLoading.value = true
-
-  try {
-    const engine = await import('./audio/engine')
-
-    // Resume AudioContext in user gesture context (no awaits before this call)
-    engine.resumeAudio()
-
-    engine.stop()
-
-    document.querySelectorAll('.strudel-box').forEach(box => {
-      box.classList.remove('is-active')
-    })
-
-    const code = textareaRef.value?.value || codeContent.value
-    await engine.evaluate(addAnalyzer(code))
-    widgets.value = engine.getWidgets()
-    isActive.value = true
-  } catch (error) {
-    console.error('[StrudelBox] Play error:', error)
-    errorMessage.value = error instanceof Error ? error.message : String(error)
-    isActive.value = false
-  } finally {
-    isLoading.value = false
-  }
-}
-
-function widgetLabel(widget: SliderWidget): string {
-  const before = codeContent.value.slice(0, widget.from)
-  const match = before.match(/\.(\w+)\s*\(\s*$/)
-  if (match) return match[1]
-  const funcMatch = before.match(/(\w+)\s*\(\s*$/)
-  if (funcMatch) return funcMatch[1]
-  return 'slider'
-}
-
-async function handleSliderChange(widget: SliderWidget, newValue: number) {
-  const newValueStr = String(newValue)
-  const code = codeContent.value
-  codeContent.value = code.slice(0, widget.from) + newValueStr + code.slice(widget.to)
-
-  try {
-    const { reEvaluate, getWidgets } = await import('./audio/engine')
-    await reEvaluate(addAnalyzer(codeContent.value))
-    widgets.value = getWidgets()
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error)
-  }
-}
-
-async function stop() {
-  try {
-    const { stop: engineStop } = await import('./audio/engine')
-    engineStop()
-  } catch (error) {
-    console.error('[StrudelBox] Stop error:', error)
-  }
-  isActive.value = false
-  errorMessage.value = ''
-  activeLocations.value = []
-  widgets.value = []
-}
 </script>
 
 <template>
   <div class="strudel-box" :class="{ 'is-active': isActive, 'has-error': errorMessage, 'is-focused': isFocused }">
-    <!-- Barra de progreso de carga de samples -->
     <div v-if="samplesLoading" class="loading-bar">
       <div class="loading-bar-progress" :style="{ width: `${(samplesLoaded / samplesTotal) * 100}%` }"></div>
       <span class="loading-bar-text">
@@ -239,11 +333,46 @@ async function stop() {
         {{ isLoading ? '⏳' : '▶' }} Play
       </button>
       <button class="stop-btn" @click="stop">■ Stop</button>
-      <button v-if="isActive" class="reload-btn" @click="reload" title="Recargar código (Ctrl+Enter)">↻ Reload</button>
-      <button class="focus-btn" @click="toggleFocus" :title="isFocused ? 'Salir de modo focus (Esc)' : 'Modo focus'">
+      <button v-if="isActive" class="reload-btn" @click="reload" title="Recargar (Ctrl+Enter)">↻</button>
+
+      <!-- Rec button -->
+      <div class="rec-menu-wrap">
+        <button
+          class="rec-toggle-btn"
+          :class="{ 'is-armed': recState === 'armed', 'is-recording': recState === 'recording' }"
+          @click.stop="handleRecButton"
+          :title="recState === 'recording' ? 'Parar grabación' : recState === 'armed' ? 'Cancelar' : 'Grabar'"
+        >
+          {{ recState === 'recording' ? `⏹ ${recMode === 'midi' ? 'MIDI' : 'Audio'}` : recState === 'armed' ? `⏺ ${recMode === 'midi' ? 'MIDI' : 'Audio'}` : '⏺ Rec ▾' }}
+        </button>
+        <div v-if="showRecMenu && recState === 'idle'" class="sb-popover">
+          <button @click.stop="armRecording('audio')">⏺ Grabar Audio</button>
+          <button @click.stop="armRecording('midi')">⏺ Grabar MIDI</button>
+          <div class="popover-divider"></div>
+          <div class="popover-row">
+            <label>MIDI <select v-model.number="midiCycles" @click.stop>
+              <option v-for="n in [1,2,4,8,16,32]" :key="n" :value="n">{{ n }}c</option>
+            </select></label>
+            <button @click.stop="exportMidiCycles">Exportar</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Code menu -->
+      <div class="code-menu-wrap">
+        <button class="code-toggle-btn" @click.stop="showCodeMenu = !showCodeMenu" title="Código">
+          {{ copied ? '✓' : '⧉ ▾' }}
+        </button>
+        <div v-if="showCodeMenu" class="sb-popover">
+          <button @click.stop="copyCode">⧉ Copiar código</button>
+          <button @click.stop="downloadCode">↓ Descargar .txt</button>
+        </div>
+      </div>
+
+      <button class="focus-btn" @click="toggleFocus" :title="isFocused ? 'Salir (Esc)' : 'Focus'">
         {{ isFocused ? '✕' : '⛶' }}
       </button>
-      <span v-if="isActive" class="active-indicator">♪ Sonando</span>
+      <span v-if="isActive" class="active-indicator">♪</span>
     </div>
     <div class="editor-container">
       <div
@@ -419,75 +548,103 @@ async function stop() {
   white-space: pre-wrap;
 }
 
+/* Dropdown menus */
+.rec-menu-wrap,
+.code-menu-wrap {
+  position: relative;
+}
+
+.sb-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  background: #1e293b;
+  border: 1px solid #475569;
+  border-radius: 8px;
+  padding: 6px;
+  z-index: 50;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 160px;
+}
+
+.sb-popover button {
+  background: transparent;
+  color: #e2e8f0;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: 'Space Grotesk', sans-serif;
+}
+
+.sb-popover button:hover {
+  background: #334155;
+}
+
+.popover-divider {
+  height: 1px;
+  background: #334155;
+  margin: 4px 0;
+}
+
+.popover-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+}
+
+.popover-row label {
+  color: #94a3b8;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.popover-row select {
+  background: #334155;
+  color: #e2e8f0;
+  border: none;
+  border-radius: 4px;
+  padding: 2px 4px;
+  font-size: 12px;
+}
+
+.popover-row button {
+  background: #3b82f6 !important;
+  color: white !important;
+  border-radius: 4px !important;
+  padding: 4px 10px !important;
+}
+
+.popover-row button:hover {
+  background: #2563eb !important;
+}
+
 /* Syntax highlighting colors */
-:deep(.hl-function) {
-  color: #c084fc;
-  font-weight: 500;
-}
+:deep(.hl-function) { color: #c084fc; font-weight: 500; }
+:deep(.hl-method) { color: #a78bfa; }
+:deep(.hl-string) { color: #fbbf24; }
+:deep(.hl-number) { color: #f472b6; }
+:deep(.hl-comment) { color: #6b7280; font-style: italic; }
+:deep(.hl-keyword) { color: #f472b6; }
+:deep(.hl-bracket) { color: #60a5fa; font-weight: bold; }
+:deep(.hl-operator) { color: #f87171; font-weight: bold; }
+:deep(.hl-rest) { color: #6b7280; }
+:deep(.hl-alt) { color: #34d399; font-weight: bold; }
+:deep(.hl-comma) { color: #9ca3af; }
+:deep(.hl-note) { color: #4ade80; font-weight: 500; }
+:deep(.hl-sample) { color: #fcd34d; }
+:deep(.hl-paren) { color: #9ca3af; }
+:deep(.hl-op) { color: #f472b6; }
 
-:deep(.hl-method) {
-  color: #a78bfa;
-}
-
-:deep(.hl-string) {
-  color: #fbbf24;
-}
-
-:deep(.hl-number) {
-  color: #f472b6;
-}
-
-:deep(.hl-comment) {
-  color: #6b7280;
-  font-style: italic;
-}
-
-:deep(.hl-keyword) {
-  color: #f472b6;
-}
-
-/* Mininotation dentro de strings */
-:deep(.hl-bracket) {
-  color: #60a5fa;
-  font-weight: bold;
-}
-
-:deep(.hl-operator) {
-  color: #f87171;
-  font-weight: bold;
-}
-
-:deep(.hl-rest) {
-  color: #6b7280;
-}
-
-:deep(.hl-alt) {
-  color: #34d399;
-  font-weight: bold;
-}
-
-:deep(.hl-comma) {
-  color: #9ca3af;
-}
-
-:deep(.hl-note) {
-  color: #4ade80;
-  font-weight: 500;
-}
-
-:deep(.hl-sample) {
-  color: #fcd34d;
-}
-
-:deep(.hl-paren) {
-  color: #9ca3af;
-}
-
-:deep(.hl-op) {
-  color: #f472b6;
-}
-
-/* Highlight activo - elemento que está sonando */
 :deep(.hl-active) {
   background: rgba(99, 102, 241, 0.4);
   border-radius: 2px;
@@ -496,13 +653,7 @@ async function stop() {
 }
 
 @keyframes pulse-glow {
-  0% {
-    background: rgba(99, 102, 241, 0.8);
-    box-shadow: 0 0 16px rgba(99, 102, 241, 0.9);
-  }
-  100% {
-    background: rgba(99, 102, 241, 0.4);
-    box-shadow: 0 0 8px rgba(99, 102, 241, 0.6);
-  }
+  0% { background: rgba(99, 102, 241, 0.8); box-shadow: 0 0 16px rgba(99, 102, 241, 0.9); }
+  100% { background: rgba(99, 102, 241, 0.4); box-shadow: 0 0 8px rgba(99, 102, 241, 0.6); }
 }
 </style>

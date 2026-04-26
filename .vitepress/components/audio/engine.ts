@@ -298,6 +298,127 @@ export function getWidgets(): Widget[] {
   return (strudelRepl?.state?.widgets || []).filter((w: any) => w.type === 'slider')
 }
 
+// MIDI recording
+let recordingHaps: any[] = []
+let recordingStart = 0
+let recordingRafId: number | null = null
+let lastRecordedTime = 0
+
+export function startRecording(): void {
+  recordingHaps = []
+  recordingStart = getSchedulerTime()
+  lastRecordedTime = recordingStart
+  pollRecording()
+}
+
+function pollRecording() {
+  const now = getSchedulerTime()
+  if (now > lastRecordedTime) {
+    const pattern = getActivePattern()
+    if (pattern) {
+      try {
+        const haps = pattern.queryArc(lastRecordedTime, now)
+        for (const hap of haps) {
+          if (hap.hasOnset()) {
+            recordingHaps.push({
+              ...hap,
+              whole: {
+                begin: { valueOf: () => hap.whole.begin.valueOf() - recordingStart },
+                end: { valueOf: () => hap.whole.end.valueOf() - recordingStart },
+              },
+              value: { ...hap.value },
+            })
+          }
+        }
+      } catch {}
+    }
+    lastRecordedTime = now
+  }
+  recordingRafId = requestAnimationFrame(pollRecording)
+}
+
+export function stopRecording(): { haps: any[]; duration: number; cps: number } {
+  if (recordingRafId !== null) {
+    cancelAnimationFrame(recordingRafId)
+    recordingRafId = null
+  }
+  const duration = getSchedulerTime() - recordingStart
+  const cps = getCps()
+  const haps = recordingHaps
+  recordingHaps = []
+  return { haps, duration, cps }
+}
+
+export function isRecordingActive(): boolean {
+  return recordingRafId !== null
+}
+
+// Audio recording
+let mediaRecorder: MediaRecorder | null = null
+let audioChunks: Blob[] = []
+let mediaStreamDest: MediaStreamAudioDestinationNode | null = null
+let recGainNode: GainNode | null = null
+
+export function isAudioRecordingActive(): boolean {
+  return mediaRecorder !== null && mediaRecorder.state === 'recording'
+}
+
+export async function startAudioRecording(): Promise<void> {
+  await ensureInitialized()
+  const ctx = strudelGetAudioContext ? strudelGetAudioContext() : cachedAudioContext
+  if (!ctx) throw new Error('AudioContext not available')
+
+  mediaStreamDest = ctx.createMediaStreamDestination()
+
+  // Tap into the audio output by inserting a gain node between
+  // the last node and destination, then splitting to both destination and recorder
+  recGainNode = ctx.createGain()
+  recGainNode.connect(ctx.destination)
+  recGainNode.connect(mediaStreamDest)
+
+  // Re-route: disconnect destination, connect through our gain node
+  // We can't disconnect others from destination, so we connect our recorder
+  // to the destination node directly using createMediaStreamDestination
+  // Alternative: use the analyser node we already have
+  const analyser = strudelGetAnalyserById ? strudelGetAnalyserById(ANALYZER_ID) : null
+  if (analyser) {
+    analyser.connect(mediaStreamDest)
+  }
+
+  audioChunks = []
+  mediaRecorder = new MediaRecorder(mediaStreamDest.stream)
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data.size > 0) audioChunks.push(e.data)
+  }
+  mediaRecorder.start(100)
+}
+
+export function stopAudioRecording(): void {
+  if (!mediaRecorder || mediaRecorder.state !== 'recording') return
+
+  mediaRecorder.onstop = () => {
+    const mimeType = mediaRecorder!.mimeType || 'audio/webm'
+    const ext = mimeType.includes('mp4') ? 'mp4' : mimeType.includes('ogg') ? 'ogg' : 'webm'
+    const blob = new Blob(audioChunks, { type: mimeType })
+    const link = document.createElement('a')
+    link.download = `strudel-${Date.now()}.${ext}`
+    link.href = URL.createObjectURL(blob)
+    link.click()
+    URL.revokeObjectURL(link.href)
+    audioChunks = []
+    mediaRecorder = null
+  }
+  mediaRecorder.stop()
+
+  // Cleanup: disconnect recorder from analyser
+  try {
+    const analyser = strudelGetAnalyserById ? strudelGetAnalyserById(ANALYZER_ID) : null
+    if (analyser && mediaStreamDest) analyser.disconnect(mediaStreamDest)
+    if (recGainNode) { recGainNode.disconnect(); recGainNode = null }
+  } catch {}
+  mediaStreamDest = null
+}
+
 export function stop(): void {
   console.log('[StrudelEngine] Stopping')
   if (strudelHush) {
