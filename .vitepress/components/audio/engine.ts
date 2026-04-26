@@ -171,10 +171,18 @@ async function ensureInitialized(): Promise<void> {
       sliderWithID: (_id: string, value: number) => value,
     })
 
-    // Cachear AudioContext
+    // Cachear AudioContext y forzar resume
     if (strudelGetAudioContext) {
       cachedAudioContext = strudelGetAudioContext()
+      if (cachedAudioContext.state === 'suspended') {
+        await cachedAudioContext.resume()
+      }
     }
+
+    // Forzar carga de AudioWorklets (superdough) con nota silenciosa
+    try {
+      await strudelEvaluate!('silence', false)
+    } catch {}
 
     // Cargar sample maps (secuencialmente para mostrar progreso)
     if (strudelSamples) {
@@ -249,8 +257,9 @@ function emitNoteEvent(hap: any, cps: number, begin: number) {
 export async function evaluate(code: string): Promise<void> {
   try {
     await ensureInitialized()
-    if (cachedAudioContext?.state === 'suspended') {
-      await cachedAudioContext.resume()
+    const ctx = strudelGetAudioContext ? strudelGetAudioContext() : cachedAudioContext
+    if (ctx?.state === 'suspended') {
+      await ctx.resume()
     }
     console.log('[StrudelEngine] Evaluating:', code)
     if (strudelEvaluate) {
@@ -267,8 +276,9 @@ export async function evaluate(code: string): Promise<void> {
 export async function reEvaluate(code: string): Promise<void> {
   try {
     await ensureInitialized()
-    if (cachedAudioContext?.state === 'suspended') {
-      await cachedAudioContext.resume()
+    const ctx = strudelGetAudioContext ? strudelGetAudioContext() : cachedAudioContext
+    if (ctx?.state === 'suspended') {
+      await ctx.resume()
     }
     if (strudelEvaluate) {
       await strudelEvaluate(code, true)
