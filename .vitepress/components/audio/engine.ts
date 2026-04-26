@@ -249,6 +249,9 @@ function emitNoteEvent(hap: any, cps: number, begin: number) {
 export async function evaluate(code: string): Promise<void> {
   try {
     await ensureInitialized()
+    if (cachedAudioContext?.state === 'suspended') {
+      await cachedAudioContext.resume()
+    }
     console.log('[StrudelEngine] Evaluating:', code)
     if (strudelEvaluate) {
       await strudelEvaluate(code, true)
@@ -264,6 +267,9 @@ export async function evaluate(code: string): Promise<void> {
 export async function reEvaluate(code: string): Promise<void> {
   try {
     await ensureInitialized()
+    if (cachedAudioContext?.state === 'suspended') {
+      await cachedAudioContext.resume()
+    }
     if (strudelEvaluate) {
       await strudelEvaluate(code, true)
     }
