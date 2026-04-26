@@ -6,7 +6,7 @@ const props = defineProps<{
 }>()
 
 const isExpanded = ref(true)
-const activeGroup = ref<'audio' | 'notes' | 'keyboard'>('audio')
+const activeGroup = ref<'audio' | 'notes' | 'keyboard' | 'score'>('audio')
 
 // Canvas refs - Grupo Audio
 const waveformCanvas = ref<HTMLCanvasElement | null>(null)
@@ -20,6 +20,9 @@ const pianorollCanvas = ref<HTMLCanvasElement | null>(null)
 
 // Canvas refs - Grupo Teclado
 const keyboardCanvas = ref<HTMLCanvasElement | null>(null)
+
+// Canvas refs - Grupo Partitura
+const scoreCanvas = ref<HTMLCanvasElement | null>(null)
 
 let rafId: number | null = null
 let cleanupPlayListener: (() => void) | null = null
@@ -40,6 +43,7 @@ const solfeo = ref(false)
 const showSpiral = ref(true)
 const kbLabels = ref(true)
 const kbMidi = ref(false)
+const scoreCycles = ref(4)
 const keyboardStart = ref(36)
 const keyboardEnd = ref(84)
 const showSettings = ref(false)
@@ -114,6 +118,10 @@ const paramHelp: Record<string, { title: string; desc: string }> = {
   kbMidi: {
     title: 'Numeros MIDI',
     desc: 'Muestra el numero MIDI (0-127) en vez del nombre de la nota. Util para entender la numeracion MIDI.'
+  },
+  scoreCycles: {
+    title: 'Compases',
+    desc: 'Numero de ciclos/compases a mostrar en la partitura. Cada ciclo de Strudel se representa como un compas de 4/4.'
   },
   kbOctava: {
     title: 'Octava inicial',
@@ -1127,6 +1135,329 @@ function drawKeyboard(ctx: CanvasRenderingContext2D, now: number, startMidi: num
   }
 }
 
+function drawScore(ctx: CanvasRenderingContext2D, scoreEvents: NoteEvent[], now: number, numCycles: number, mx: number | null, my: number | null) {
+  const { width, height } = ctx.canvas
+  ctx.clearRect(0, 0, width, height)
+
+  const dpr = window.devicePixelRatio || 1
+  ctx.fillStyle = '#f8fafc'
+  ctx.fillRect(0, 0, width, height)
+
+  const marginLeft = 50 * dpr
+  const marginRight = 20 * dpr
+  const marginTop = 20 * dpr
+  const scoreWidth = width - marginLeft - marginRight
+
+  const lineSpacing = Math.min((height - marginTop * 2) / 12, 8 * dpr)
+  const noteRadius = lineSpacing * 0.45
+
+  const midiValues = scoreEvents.filter(e => e.midi !== undefined).map(e => Math.round(e.midi!))
+  const minMidi = midiValues.length > 0 ? Math.min(...midiValues) : 60
+  const maxMidi = midiValues.length > 0 ? Math.max(...midiValues) : 72
+  const useBassClef = minMidi < 55
+  const useTrebleClef = maxMidi >= 55
+
+  let trebleY = 0, bassY = 0
+  if (useBassClef && useTrebleClef) {
+    trebleY = marginTop + lineSpacing * 2
+    bassY = marginTop + lineSpacing * 9
+  } else if (useBassClef) {
+    bassY = marginTop + (height - marginTop * 2) / 2 - lineSpacing * 2
+  } else {
+    trebleY = marginTop + (height - marginTop * 2) / 2 - lineSpacing * 2
+  }
+
+  const staffMidY = useTrebleClef ? trebleY + lineSpacing * 2 : bassY + lineSpacing * 2
+
+  // Staff lines
+  ctx.strokeStyle = '#94a3b8'
+  ctx.lineWidth = 1
+  function drawStaff(y: number) {
+    for (let i = 0; i < 5; i++) {
+      ctx.beginPath()
+      ctx.moveTo(marginLeft, y + i * lineSpacing)
+      ctx.lineTo(width - marginRight, y + i * lineSpacing)
+      ctx.stroke()
+    }
+  }
+  if (useTrebleClef) drawStaff(trebleY)
+  if (useBassClef) drawStaff(bassY)
+
+  // Clefs
+  ctx.fillStyle = '#1e293b'
+  ctx.textBaseline = 'middle'
+  ctx.textAlign = 'center'
+  if (useTrebleClef) { ctx.font = `bold ${lineSpacing * 4}px serif`; ctx.fillText('𝄞', marginLeft - 20 * dpr, trebleY + lineSpacing * 2) }
+  if (useBassClef) { ctx.font = `bold ${lineSpacing * 3}px serif`; ctx.fillText('𝄢', marginLeft - 20 * dpr, bassY + lineSpacing * 2) }
+
+  // Bar lines
+  const measureWidth = scoreWidth / numCycles
+  ctx.strokeStyle = '#64748b'
+  ctx.lineWidth = 1
+  const barTop = useTrebleClef ? trebleY : bassY
+  const barBottom = useBassClef ? bassY + lineSpacing * 4 : trebleY + lineSpacing * 4
+  for (let m = 0; m <= numCycles; m++) {
+    const x = marginLeft + m * measureWidth
+    ctx.beginPath(); ctx.moveTo(x, barTop); ctx.lineTo(x, barBottom); ctx.stroke()
+  }
+
+  // Beat grid
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)'
+  ctx.setLineDash([2, 4])
+  for (let m = 0; m < numCycles; m++) {
+    for (let b = 1; b < 4; b++) {
+      const x = marginLeft + m * measureWidth + (b / 4) * measureWidth
+      ctx.beginPath(); ctx.moveTo(x, barTop); ctx.lineTo(x, barBottom); ctx.stroke()
+    }
+  }
+  ctx.setLineDash([])
+
+  // Helpers
+  const NOTE_Y_MAP = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6]
+  const IS_SHARP = [false, true, false, true, false, false, true, false, true, false, true, false]
+
+  function midiToStaffY(midi: number): { y: number; ledgerLines: number[]; sharp: boolean } {
+    const octave = Math.floor(midi / 12) - 1
+    const diatonicPos = (octave - 4) * 7 + NOTE_Y_MAP[midi % 12]
+    const sharp = IS_SHARP[midi % 12]
+    let y: number, staffTop: number
+    const ledgerLines: number[] = []
+
+    if (midi >= 55 && useTrebleClef) {
+      y = trebleY + lineSpacing * 2 - (diatonicPos - 6) * (lineSpacing / 2)
+      staffTop = trebleY
+    } else {
+      y = bassY + lineSpacing * 2 - (diatonicPos + 5) * (lineSpacing / 2)
+      staffTop = bassY
+    }
+    if (y > staffTop + lineSpacing * 4 + lineSpacing * 0.25) {
+      for (let ly = staffTop + lineSpacing * 5; ly <= y + lineSpacing * 0.25; ly += lineSpacing) ledgerLines.push(ly)
+    }
+    if (y < staffTop - lineSpacing * 0.25) {
+      for (let ly = staffTop - lineSpacing; ly >= y - lineSpacing * 0.25; ly -= lineSpacing) ledgerLines.push(ly)
+    }
+    return { y, ledgerLines, sharp }
+  }
+
+  function durToType(dur: number): 'whole' | 'half' | 'quarter' | 'eighth' | 'sixteenth' {
+    if (dur >= 0.9) return 'whole'
+    if (dur >= 0.45) return 'half'
+    if (dur >= 0.2) return 'quarter'
+    if (dur >= 0.1) return 'eighth'
+    return 'sixteenth'
+  }
+
+  // Group simultaneous notes into chords
+  type ScoreNote = { midi: number; time: number; dur: number; x: number; y: number; ledgerLines: number[]; sharp: boolean; type: ReturnType<typeof durToType>; active: boolean }
+  const notes: ScoreNote[] = []
+
+  for (const e of scoreEvents) {
+    if (e.midi === undefined || e.time < 0 || e.time >= numCycles) continue
+    const midi = Math.round(e.midi)
+    const x = marginLeft + (e.time / numCycles) * scoreWidth
+    const { y, ledgerLines, sharp } = midiToStaffY(midi)
+    notes.push({ midi, time: e.time, dur: e.dur, x, y, ledgerLines, sharp, type: durToType(e.dur), active: e.time <= now && e.time + e.dur > now })
+  }
+
+  // Group into chords (same time) and beaming groups (consecutive eighths/sixteenths)
+  type Chord = ScoreNote[]
+  const chords: Chord[] = []
+  const epsilon = 0.001
+
+  const sorted = [...notes].sort((a, b) => a.time - b.time || a.midi - b.midi)
+  let i = 0
+  while (i < sorted.length) {
+    const chord: Chord = [sorted[i]]
+    while (i + 1 < sorted.length && Math.abs(sorted[i + 1].time - sorted[i].time) < epsilon) {
+      i++
+      chord.push(sorted[i])
+    }
+    chords.push(chord)
+    i++
+  }
+
+  // Draw function for a single note head + accidental
+  function drawNoteHead(n: ScoreNote, xOff: number, color: string) {
+    const nx = n.x + xOff
+    // Ledger lines
+    ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1
+    for (const ly of n.ledgerLines) {
+      ctx.beginPath(); ctx.moveTo(nx - noteRadius * 1.5, ly); ctx.lineTo(nx + noteRadius * 1.5, ly); ctx.stroke()
+    }
+    // Sharp
+    if (n.sharp) {
+      ctx.fillStyle = color; ctx.font = `${lineSpacing * 1.2}px serif`
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+      ctx.fillText('♯', nx - noteRadius * 2.2, n.y)
+    }
+    // Head
+    ctx.beginPath()
+    ctx.ellipse(nx, n.y, noteRadius, noteRadius * 0.7, -0.3, 0, Math.PI * 2)
+    if (n.type === 'whole' || n.type === 'half') {
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke()
+    } else {
+      ctx.fillStyle = color; ctx.fill()
+    }
+  }
+
+  // Draw chords
+  for (const chord of chords) {
+    const color = chord[0].active ? '#3b82f6' : '#1e293b'
+    const type = chord[0].type
+    const baseX = chord[0].x
+
+    // For chords: check if adjacent notes need offset (second interval = 1 diatonic step)
+    const ys = chord.map(n => n.y).sort((a, b) => a - b)
+    const needsOffset: boolean[] = chord.map(() => false)
+    if (chord.length > 1) {
+      const sortedByY = [...chord].sort((a, b) => a.y - b.y)
+      for (let j = 1; j < sortedByY.length; j++) {
+        if (Math.abs(sortedByY[j].y - sortedByY[j - 1].y) < lineSpacing * 0.75) {
+          const idx = chord.indexOf(sortedByY[j])
+          needsOffset[idx] = true
+        }
+      }
+    }
+
+    // Draw note heads
+    for (let j = 0; j < chord.length; j++) {
+      drawNoteHead(chord[j], needsOffset[j] ? noteRadius * 2.2 : 0, color)
+    }
+
+    // Stem direction: majority vote
+    const stemUp = chord.filter(n => n.y > staffMidY).length >= chord.length / 2
+    const topY = Math.min(...ys)
+    const bottomY = Math.max(...ys)
+
+    if (type !== 'whole') {
+      const stemLength = lineSpacing * 3.5
+      const sx = stemUp ? baseX + noteRadius * 0.9 : baseX - noteRadius * 0.9
+      const stemStart = stemUp ? bottomY : topY
+      const stemEnd = stemUp ? topY - stemLength : bottomY + stemLength
+
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5
+      ctx.beginPath(); ctx.moveTo(sx, stemStart); ctx.lineTo(sx, stemEnd); ctx.stroke()
+
+      // Store for beaming
+      ;(chord as any)._stemX = sx
+      ;(chord as any)._stemEnd = stemEnd
+      ;(chord as any)._stemUp = stemUp
+    }
+  }
+
+  // Beaming: connect consecutive eighth/sixteenth chords
+  for (let ci = 0; ci < chords.length; ci++) {
+    const c = chords[ci]
+    if (c[0].type !== 'eighth' && c[0].type !== 'sixteenth') continue
+
+    // Find beam group: consecutive chords with same type in same beat
+    const beat = Math.floor(c[0].time * 4) // which beat (0-based within pattern)
+    let beamEnd = ci
+    while (beamEnd + 1 < chords.length) {
+      const nc = chords[beamEnd + 1]
+      if ((nc[0].type !== 'eighth' && nc[0].type !== 'sixteenth') || Math.floor(nc[0].time * 4) !== beat) break
+      beamEnd++
+    }
+
+    if (beamEnd > ci) {
+      // Draw beam
+      const beamChords = chords.slice(ci, beamEnd + 1)
+      const stemUp = (beamChords[0] as any)._stemUp
+      const color = beamChords[0][0].active ? '#3b82f6' : '#1e293b'
+      ctx.fillStyle = color
+
+      for (let b = 0; b < (beamChords[0][0].type === 'sixteenth' ? 2 : 1); b++) {
+        const beamOffset = b * lineSpacing * 0.8 * (stemUp ? 1 : -1)
+        for (let bi = 0; bi < beamChords.length - 1; bi++) {
+          const x1 = (beamChords[bi] as any)._stemX
+          const y1 = (beamChords[bi] as any)._stemEnd + beamOffset
+          const x2 = (beamChords[bi + 1] as any)._stemX
+          const y2 = (beamChords[bi + 1] as any)._stemEnd + beamOffset
+          ctx.fillRect(Math.min(x1, x2), Math.min(y1, y2) - lineSpacing * 0.15, Math.abs(x2 - x1), lineSpacing * 0.3)
+        }
+      }
+      ci = beamEnd // skip beamed notes
+    } else {
+      // Single note: draw flag
+      const sx = (c as any)._stemX
+      const sy = (c as any)._stemEnd
+      const stemUp = (c as any)._stemUp
+      const flagDir = stemUp ? 1 : -1
+      ctx.strokeStyle = c[0].active ? '#3b82f6' : '#1e293b'
+      ctx.lineWidth = 1.5
+      ctx.beginPath()
+      ctx.moveTo(sx, sy)
+      ctx.quadraticCurveTo(sx + 8 * dpr * flagDir, sy + lineSpacing * 1.5 * flagDir, sx, sy + lineSpacing * 2.5 * flagDir)
+      ctx.stroke()
+      if (c[0].type === 'sixteenth') {
+        ctx.beginPath()
+        ctx.moveTo(sx, sy + lineSpacing * 0.8 * flagDir)
+        ctx.quadraticCurveTo(sx + 8 * dpr * flagDir, sy + lineSpacing * 2.3 * flagDir, sx, sy + lineSpacing * 3.3 * flagDir)
+        ctx.stroke()
+      }
+    }
+  }
+
+  // Rests: find gaps in each beat subdivision
+  const restSymbols: Record<string, string> = { whole: '𝄻', half: '𝄼', quarter: '𝄽', eighth: '𝄾', sixteenth: '𝄿' }
+  const restStaffY = useTrebleClef ? trebleY + lineSpacing * 1.5 : bassY + lineSpacing * 1.5
+
+  for (let m = 0; m < numCycles; m++) {
+    // Check each quarter beat for notes
+    for (let b = 0; b < 4; b++) {
+      const beatStart = m + b / 4
+      const beatEnd = m + (b + 1) / 4
+      const hasNote = scoreEvents.some(e => e.midi !== undefined && e.time < beatEnd && e.time + e.dur > beatStart)
+      if (!hasNote) {
+        const rx = marginLeft + (beatStart / numCycles) * scoreWidth + measureWidth / 8
+        ctx.fillStyle = '#94a3b8'
+        ctx.font = `${lineSpacing * 2}px serif`
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(restSymbols.quarter, rx, restStaffY)
+      }
+    }
+  }
+
+  // Playhead
+  if (now >= 0 && now < numCycles) {
+    const px = marginLeft + (now / numCycles) * scoreWidth
+    ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2
+    ctx.beginPath(); ctx.moveTo(px, barTop - lineSpacing); ctx.lineTo(px, barBottom + lineSpacing); ctx.stroke()
+  }
+
+  // Measure numbers
+  ctx.fillStyle = '#94a3b8'
+  ctx.font = `${9 * dpr}px sans-serif`
+  ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'
+  for (let m = 0; m < numCycles; m++) {
+    ctx.fillText(`${m + 1}`, marginLeft + m * measureWidth + 3 * dpr, barTop - 3 * dpr)
+  }
+
+  // Hover: show note name
+  if (mx !== null && my !== null && mx >= marginLeft && mx <= width - marginRight) {
+    const timePos = ((mx - marginLeft) / scoreWidth) * numCycles
+    const closest = notes.reduce<ScoreNote | null>((best, n) => {
+      const dist = Math.abs(n.x - mx) + Math.abs(n.y - my)
+      if (dist < noteRadius * 4 && (!best || dist < Math.abs(best.x - mx) + Math.abs(best.y - my))) return n
+      return best
+    }, null)
+    if (closest) {
+      const names = solfeo.value ? NOTE_NAMES_SOL : NOTE_NAMES_EN
+      const label = `${names[closest.midi % 12]}${Math.floor(closest.midi / 12) - 1}`
+      ctx.fillStyle = 'rgba(30, 41, 59, 0.9)'
+      ctx.font = `bold ${11 * dpr}px monospace`
+      const tw = ctx.measureText(label).width
+      const lx = mx + 10 * dpr
+      const ly = my - 16 * dpr
+      ctx.fillRect(lx - 4 * dpr, ly - 2 * dpr, tw + 8 * dpr, 14 * dpr)
+      ctx.fillStyle = '#e2e8f0'
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle'
+      ctx.fillText(label, lx, ly + 5 * dpr)
+    }
+  }
+}
+
 async function startVisualization() {
   if (rafId !== null) return
 
@@ -1293,6 +1624,18 @@ async function startVisualization() {
       const kbEvents = hapsToEvents(kbHaps)
 
       if (kbCtx) drawKeyboard(kbCtx, now, keyboardStart.value, keyboardEnd.value, kbEvents, kbLabels.value, kbMidi.value)
+    } else if (activeGroup.value === 'score' && !frozen.value) {
+      const scCtx = scoreCanvas.value?.getContext('2d')
+      if (scoreCanvas.value) resizeCanvas(scoreCanvas.value)
+
+      const now = getSchedulerTime()
+      const nc = scoreCycles.value
+      const scHaps = queryPattern(0, nc)
+      const scEvents = hapsToEvents(scHaps)
+
+      const scMx = hoverCanvas.value === 'score' ? hoverX.value : null
+      const scMy = hoverCanvas.value === 'score' ? hoverY.value : null
+      if (scCtx) drawScore(scCtx, scEvents, now % nc, nc, scMx, scMy)
     }
 
     rafId = requestAnimationFrame(draw)
@@ -1327,7 +1670,7 @@ function stopVisualization() {
 
 function clearAll() {
   spectrogramClean = null
-  const canvases = [spectrogramCanvas, waveformCanvas, spectrumCanvas, spiralCanvas, pitchwheelCanvas, pianorollCanvas, keyboardCanvas]
+  const canvases = [spectrogramCanvas, waveformCanvas, spectrumCanvas, spiralCanvas, pitchwheelCanvas, pianorollCanvas, keyboardCanvas, scoreCanvas]
   for (const c of canvases) {
     const ctx = c.value?.getContext('2d')
     if (ctx) ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height)
@@ -1345,8 +1688,10 @@ function exportScreenshot() {
     if (spiralCanvas.value) canvases.push(spiralCanvas.value)
     if (pitchwheelCanvas.value) canvases.push(pitchwheelCanvas.value)
     if (pianorollCanvas.value) canvases.push(pianorollCanvas.value)
-  } else {
+  } else if (activeGroup.value === 'keyboard') {
     if (keyboardCanvas.value) canvases.push(keyboardCanvas.value)
+  } else {
+    if (scoreCanvas.value) canvases.push(scoreCanvas.value)
   }
   if (canvases.length === 0) return
 
@@ -1414,6 +1759,7 @@ onUnmounted(() => {
           <button class="viz-tab" :class="{ active: activeGroup === 'audio' }" @click="activeGroup = 'audio'">Audio</button>
           <button class="viz-tab" :class="{ active: activeGroup === 'notes' }" @click="activeGroup = 'notes'">Notas</button>
           <button class="viz-tab" :class="{ active: activeGroup === 'keyboard' }" @click="activeGroup = 'keyboard'">Teclado</button>
+          <button class="viz-tab" :class="{ active: activeGroup === 'score' }" @click="activeGroup = 'score'">Partitura</button>
         </div>
         <div class="viz-actions">
           <button class="viz-btn" :class="{ 'viz-btn-active': frozen }" @click="frozen = !frozen" title="Congelar visualizaciones">
@@ -1580,6 +1926,27 @@ onUnmounted(() => {
             </div>
           </div>
         </template>
+        <template v-if="activeGroup === 'score'">
+          <div class="settings-group">
+            <span class="settings-group-title">Partitura</span>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Compases</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.scoreCycles.title }}</span><span class="tt-desc">{{ paramHelp.scoreCycles.desc }}</span></div>
+              </details>
+              <select v-model.number="scoreCycles">
+                <option v-for="n in [1,2,4,8,16]" :key="n" :value="n">{{ n }}</option>
+              </select>
+            </div>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Solfeo</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.solfeo.title }}</span><span class="tt-desc">{{ paramHelp.solfeo.desc }}</span></div>
+              </details>
+              <input type="checkbox" v-model="solfeo" />
+            </div>
+          </div>
+        </template>
       </div>
     </div>
     <div class="viz-content" v-show="isExpanded">
@@ -1616,6 +1983,9 @@ onUnmounted(() => {
       <!-- Grupo Teclado -->
       <div v-show="activeGroup === 'keyboard'" class="viz-container" style="flex: 1">
         <canvas ref="keyboardCanvas"></canvas>
+      </div>
+      <div v-show="activeGroup === 'score'" class="viz-container" style="flex: 1">
+        <canvas ref="scoreCanvas" @mousemove="(e) => handleCanvasMove('score', e)" @mouseleave="handleCanvasLeave"></canvas>
       </div>
     </div>
   </div>
