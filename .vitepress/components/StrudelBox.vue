@@ -121,19 +121,20 @@ onMounted(async () => {
     }
   }
 
-  // Suscribirse al estado de carga de samples y eventos de highlight
+  // Suscribirse al estado de carga e iniciar carga anticipada
   try {
-    const { onLoadingStateChange, onHighlightEvent } = await import('./audio/engine')
+    const engine = await import('./audio/engine')
 
-    unsubscribeLoading = onLoadingStateChange((state) => {
+    engine.beginInitialization()
+
+    unsubscribeLoading = engine.onLoadingStateChange((state) => {
       samplesLoading.value = state.isLoading
       samplesLoaded.value = state.loaded
       samplesTotal.value = state.total
       currentSampleFile.value = state.currentFile
     })
 
-    unsubscribeHighlight = onHighlightEvent((event) => {
-      // Solo actualizar si esta caja está activa
+    unsubscribeHighlight = engine.onHighlightEvent((event) => {
       if (isActive.value) {
         activeLocations.value = event.locations
       }
@@ -162,17 +163,20 @@ async function play() {
   isLoading.value = true
 
   try {
-    const { evaluate, stop: engineStop, getWidgets } = await import('./audio/engine')
+    const engine = await import('./audio/engine')
 
-    engineStop()
+    // Resume AudioContext in user gesture context (no awaits before this call)
+    engine.resumeAudio()
+
+    engine.stop()
 
     document.querySelectorAll('.strudel-box').forEach(box => {
       box.classList.remove('is-active')
     })
 
     const code = textareaRef.value?.value || codeContent.value
-    await evaluate(addAnalyzer(code))
-    widgets.value = getWidgets()
+    await engine.evaluate(addAnalyzer(code))
+    widgets.value = engine.getWidgets()
     isActive.value = true
   } catch (error) {
     console.error('[StrudelBox] Play error:', error)

@@ -146,6 +146,16 @@ const SAMPLE_MAPS = [
 // Cache del AudioContext para evitar llamadas repetidas
 let cachedAudioContext: AudioContext | null = null
 
+export function beginInitialization(): void {
+  ensureInitialized()
+}
+
+export function resumeAudio(): void {
+  if (cachedAudioContext && cachedAudioContext.state === 'suspended') {
+    cachedAudioContext.resume()
+  }
+}
+
 async function ensureInitialized(): Promise<void> {
   if (initialized) return
   if (initPromise) return initPromise
