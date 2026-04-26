@@ -14,6 +14,7 @@ const FUNCTIONS = [
   'struct', 'mask', 'euclid', 'euclidLegato',
   'ply', 'striate', 'chop', 'slice',
   'setcps', 'cps', 'samples', 'analyze',
+  'slider',
 ]
 
 // Métodos encadenados (después de .)
@@ -207,18 +208,22 @@ export function highlightStrudelWithMeta(code: string): HighlightResult {
     }
     // Template strings
     else if (code[i] === '`') {
-      const start = i
-      let str = '`'
+      const stringStart = i
+      result += '<span class="hl-string">'
+      result += escapeHtml('`')
       i++
+      const contentStart = i
+      let content = ''
       while (i < code.length && code[i] !== '`') {
-        str += code[i]
+        content += code[i]
         i++
       }
+      result += highlightMininotation(content, contentStart)
       if (i < code.length) {
-        str += '`'
+        result += escapeHtml('`')
         i++
       }
-      result += spanWithPos('hl-string', str, start, i)
+      result += '</span>'
     }
     // Números
     else if (/[0-9]/.test(code[i]) && (i === 0 || !/[a-zA-Z_]/.test(code[i - 1]))) {

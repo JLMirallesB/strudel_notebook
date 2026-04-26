@@ -109,12 +109,27 @@ export function getLoadingState(): LoadingState {
   return loadingState
 }
 
+// Widgets
+export type SliderWidget = {
+  from: number
+  to: number
+  value: string
+  min: number
+  max: number
+  step?: number
+  type: 'slider'
+}
+
+export type Widget = SliderWidget
+
 // Referencia dinámica a las funciones de Strudel
 let strudelEvaluate: ((code: string, autoplay?: boolean) => Promise<unknown>) | null = null
 let strudelHush: (() => void) | null = null
 let strudelGetAnalyzerData: ((type: string, id: number) => Float32Array | null) | null = null
 let strudelGetAudioContext: (() => AudioContext) | null = null
 let strudelSamples: ((url: string) => Promise<void>) | null = null
+let strudelEvalScope: ((...args: any[]) => Promise<void>) | null = null
+let strudelGetAnalyserById: ((id: number, fftSize?: number, smoothing?: number) => AnalyserNode) | null = null
 let strudelRepl: any = null
 
 // URLs de los sample maps de dough-samples (mismos que usa strudel.cc)
@@ -148,6 +163,13 @@ async function ensureInitialized(): Promise<void> {
     strudelGetAnalyzerData = strudel.getAnalyzerData
     strudelGetAudioContext = strudel.getAudioContext
     strudelSamples = strudel.samples
+    strudelEvalScope = strudel.evalScope
+    strudelGetAnalyserById = strudel.getAnalyserById
+
+    // Registrar sliderWithID en el eval scope (no viene incluido sin @strudel/codemirror)
+    await strudelEvalScope({
+      sliderWithID: (_id: string, value: number) => value,
+    })
 
     // Cachear AudioContext
     if (strudelGetAudioContext) {
@@ -239,6 +261,22 @@ export async function evaluate(code: string): Promise<void> {
   }
 }
 
+export async function reEvaluate(code: string): Promise<void> {
+  try {
+    await ensureInitialized()
+    if (strudelEvaluate) {
+      await strudelEvaluate(code, true)
+    }
+  } catch (error) {
+    console.error('[StrudelEngine] Re-evaluation error:', error)
+    throw error
+  }
+}
+
+export function getWidgets(): Widget[] {
+  return (strudelRepl?.state?.widgets || []).filter((w: any) => w.type === 'slider')
+}
+
 export function stop(): void {
   console.log('[StrudelEngine] Stopping')
   if (strudelHush) {
@@ -267,6 +305,12 @@ export function getAnalyzerData(type: 'time' | 'frequency', id: number): Float32
 
 export function getAudioContext(): AudioContext | null {
   return cachedAudioContext
+}
+
+export function setAnalyzerFftSize(id: number, fftSize: number): void {
+  if (strudelGetAnalyserById) {
+    strudelGetAnalyserById(id, fftSize)
+  }
 }
 
 export function checkAnalyzerStatus(id: number): boolean {
@@ -377,6 +421,7 @@ type HighlightCallback = (event: HighlightEvent) => void
 const highlightListeners: HighlightCallback[] = []
 let highlightAnimationFrame: number | null = null
 let lastHighlightedLocations: string = ''
+let debugLoggedHap = false
 
 /**
  * Suscribirse a eventos de highlight.

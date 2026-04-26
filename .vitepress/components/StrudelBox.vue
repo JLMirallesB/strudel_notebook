@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import { highlightStrudel, highlightStrudelWithMeta, type StringLocation } from './mininotation-highlighter'
-import type { HighlightLocation } from './audio/engine'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { highlightStrudel } from './mininotation-highlighter'
+import type { HighlightLocation, SliderWidget } from './audio/engine'
 
 const props = defineProps<{
   code?: string
@@ -12,6 +12,7 @@ const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const highlightRef = ref<HTMLDivElement | null>(null)
 const isActive = ref(false)
 const isLoading = ref(false)
+const isFocused = ref(false)
 const errorMessage = ref('')
 const codeContent = ref('')
 
@@ -23,16 +24,16 @@ const currentSampleFile = ref('')
 
 // Estado de highlight en tiempo real
 const activeLocations = ref<HighlightLocation[]>([])
-const stringLocations = ref<StringLocation[]>([])
+
+// Widgets
+const widgets = ref<SliderWidget[]>([])
 
 let unsubscribeLoading: (() => void) | null = null
 let unsubscribeHighlight: (() => void) | null = null
 
 // Código con syntax highlighting
 const highlightedCode = computed(() => {
-  const result = highlightStrudelWithMeta(codeContent.value)
-  stringLocations.value = result.strings
-  return result.html
+  return highlightStrudel(codeContent.value)
 })
 
 // Actualizar clases de highlight activo cuando cambian las ubicaciones
@@ -44,35 +45,60 @@ watch([activeLocations, highlightRef], () => {
 function updateActiveHighlights() {
   if (!highlightRef.value) return
 
-  // Quitar clase activa de todos los elementos
   highlightRef.value.querySelectorAll('.hl-active').forEach(el => {
     el.classList.remove('hl-active')
   })
 
   if (activeLocations.value.length === 0) return
 
-  // Encontrar spans que coincidan con las ubicaciones activas
   const spans = highlightRef.value.querySelectorAll('[data-start][data-end]')
 
   for (const span of spans) {
     const spanStart = parseInt(span.getAttribute('data-start') || '0', 10)
     const spanEnd = parseInt(span.getAttribute('data-end') || '0', 10)
 
-    // Verificar si este span está dentro de alguna ubicación activa
     for (const loc of activeLocations.value) {
-      // Las ubicaciones de Strudel son relativas al contenido del string
-      // Necesitamos mapear a las posiciones absolutas en el código
-      for (const strLoc of stringLocations.value) {
-        const absStart = strLoc.contentStart + loc.start
-        const absEnd = strLoc.contentStart + loc.end
-
-        // Verificar si hay overlap
-        if (spanStart < absEnd && spanEnd > absStart) {
-          span.classList.add('hl-active')
-          break
-        }
+      if (spanStart < loc.end && spanEnd > loc.start) {
+        span.classList.add('hl-active')
+        break
       }
     }
+  }
+}
+
+async function reload() {
+  if (!isActive.value) return
+  errorMessage.value = ''
+  try {
+    const { reEvaluate, getWidgets } = await import('./audio/engine')
+    const code = textareaRef.value?.value || codeContent.value
+    await reEvaluate(addAnalyzer(code))
+    widgets.value = getWidgets()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
+function toggleFocus() {
+  isFocused.value = !isFocused.value
+  if (isFocused.value) {
+    document.body.style.overflow = 'hidden'
+  } else {
+    document.body.style.overflow = ''
+  }
+}
+
+function handleKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && isFocused.value) {
+    e.preventDefault()
+    toggleFocus()
+  } else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    e.preventDefault()
+    if (isActive.value) reload()
+    else play()
+  } else if ((e.ctrlKey || e.metaKey) && e.key === '.') {
+    e.preventDefault()
+    stop()
   }
 }
 
@@ -118,6 +144,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  document.body.style.overflow = ''
   if (unsubscribeLoading) {
     unsubscribeLoading()
   }
@@ -126,30 +153,26 @@ onUnmounted(() => {
   }
 })
 
+function addAnalyzer(code: string): string {
+  return code.includes('.analyze(') ? code : code.trim() + '.analyze(1)'
+}
+
 async function play() {
   errorMessage.value = ''
   isLoading.value = true
 
   try {
-    // Import dinámico para evitar SSR
-    const { evaluate, stop: engineStop } = await import('./audio/engine')
+    const { evaluate, stop: engineStop, getWidgets } = await import('./audio/engine')
 
-    // Detener cualquier patrón activo globalmente
     engineStop()
 
-    // Marcar todas las otras cajas como inactivas
     document.querySelectorAll('.strudel-box').forEach(box => {
       box.classList.remove('is-active')
     })
 
     const code = textareaRef.value?.value || codeContent.value
-
-    // Añadir .analyze(1) para las visualizaciones si no está ya
-    const codeWithAnalyzer = code.includes('.analyze(')
-      ? code
-      : code.trim() + '.analyze(1)'
-
-    await evaluate(codeWithAnalyzer)
+    await evaluate(addAnalyzer(code))
+    widgets.value = getWidgets()
     isActive.value = true
   } catch (error) {
     console.error('[StrudelBox] Play error:', error)
@@ -157,6 +180,29 @@ async function play() {
     isActive.value = false
   } finally {
     isLoading.value = false
+  }
+}
+
+function widgetLabel(widget: SliderWidget): string {
+  const before = codeContent.value.slice(0, widget.from)
+  const match = before.match(/\.(\w+)\s*\(\s*$/)
+  if (match) return match[1]
+  const funcMatch = before.match(/(\w+)\s*\(\s*$/)
+  if (funcMatch) return funcMatch[1]
+  return 'slider'
+}
+
+async function handleSliderChange(widget: SliderWidget, newValue: number) {
+  const newValueStr = String(newValue)
+  const code = codeContent.value
+  codeContent.value = code.slice(0, widget.from) + newValueStr + code.slice(widget.to)
+
+  try {
+    const { reEvaluate, getWidgets } = await import('./audio/engine')
+    await reEvaluate(addAnalyzer(codeContent.value))
+    widgets.value = getWidgets()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : String(error)
   }
 }
 
@@ -170,11 +216,12 @@ async function stop() {
   isActive.value = false
   errorMessage.value = ''
   activeLocations.value = []
+  widgets.value = []
 }
 </script>
 
 <template>
-  <div class="strudel-box" :class="{ 'is-active': isActive, 'has-error': errorMessage }">
+  <div class="strudel-box" :class="{ 'is-active': isActive, 'has-error': errorMessage, 'is-focused': isFocused }">
     <!-- Barra de progreso de carga de samples -->
     <div v-if="samplesLoading" class="loading-bar">
       <div class="loading-bar-progress" :style="{ width: `${(samplesLoaded / samplesTotal) * 100}%` }"></div>
@@ -188,6 +235,10 @@ async function stop() {
         {{ isLoading ? '⏳' : '▶' }} Play
       </button>
       <button class="stop-btn" @click="stop">■ Stop</button>
+      <button v-if="isActive" class="reload-btn" @click="reload" title="Recargar código (Ctrl+Enter)">↻ Reload</button>
+      <button class="focus-btn" @click="toggleFocus" :title="isFocused ? 'Salir de modo focus (Esc)' : 'Modo focus'">
+        {{ isFocused ? '✕' : '⛶' }}
+      </button>
       <span v-if="isActive" class="active-indicator">♪ Sonando</span>
     </div>
     <div class="editor-container">
@@ -202,9 +253,24 @@ async function stop() {
         :value="codeContent"
         @input="(e) => { codeContent = (e.target as HTMLTextAreaElement).value; errorMessage = '' }"
         @scroll="syncScroll"
+        @keydown="handleKeydown"
         spellcheck="false"
         class="code-textarea"
       />
+    </div>
+    <div v-if="widgets.length > 0" class="widget-panel">
+      <div v-for="(w, i) in widgets" :key="i" class="widget-slider">
+        <label class="widget-label">{{ widgetLabel(w) }}</label>
+        <input
+          type="range"
+          :min="w.min"
+          :max="w.max"
+          :step="w.step || (w.max - w.min) / 100"
+          :value="parseFloat(w.value)"
+          @input="(e) => handleSliderChange(w, parseFloat((e.target as HTMLInputElement).value))"
+        />
+        <span class="widget-value">{{ parseFloat(w.value).toFixed(2) }}</span>
+      </div>
     </div>
     <div v-if="errorMessage" class="error-message">
       {{ errorMessage }}
@@ -296,6 +362,47 @@ async function stop() {
 
 .has-error .code-textarea {
   border-color: #ef4444;
+}
+
+/* Widget panel */
+.widget-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 16px;
+  background: #1a1a2e;
+  border-top: 1px solid #334155;
+}
+
+.widget-slider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 200px;
+  flex: 1;
+}
+
+.widget-label {
+  font-size: 0.75rem;
+  color: #a78bfa;
+  font-family: 'IBM Plex Mono', monospace;
+  font-weight: 500;
+  min-width: 50px;
+}
+
+.widget-slider input[type="range"] {
+  flex: 1;
+  height: 4px;
+  accent-color: #7c3aed;
+  cursor: pointer;
+}
+
+.widget-value {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  font-family: 'IBM Plex Mono', monospace;
+  min-width: 40px;
+  text-align: right;
 }
 
 .error-message {

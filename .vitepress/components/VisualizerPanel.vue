@@ -6,7 +6,7 @@ const props = defineProps<{
 }>()
 
 const isExpanded = ref(true)
-const activeGroup = ref<'audio' | 'notes'>('audio')
+const activeGroup = ref<'audio' | 'notes' | 'keyboard'>('audio')
 
 // Canvas refs - Grupo Audio
 const waveformCanvas = ref<HTMLCanvasElement | null>(null)
@@ -18,24 +18,238 @@ const spiralCanvas = ref<HTMLCanvasElement | null>(null)
 const pitchwheelCanvas = ref<HTMLCanvasElement | null>(null)
 const pianorollCanvas = ref<HTMLCanvasElement | null>(null)
 
+// Canvas refs - Grupo Teclado
+const keyboardCanvas = ref<HTMLCanvasElement | null>(null)
+
 let rafId: number | null = null
 let cleanupPlayListener: (() => void) | null = null
 
-const MIN_DB = -90
-const MAX_DB = -10
+// Parámetros configurables
+const minDb = ref(-90)
+const maxDb = ref(-10)
+const numBars = ref(64)
+const fftSize = ref(1024)
+const waveZoom = ref(100)
+const frozen = ref(false)
+const peakHold = ref(false)
+const spectrogramLog = ref(false)
+const spectrumLine = ref(false)
+const pianoLookbehind = ref(2)
+const punchcard = ref(false)
+const solfeo = ref(false)
+const showSpiral = ref(true)
+const kbLabels = ref(true)
+const kbMidi = ref(false)
+const keyboardStart = ref(36)
+const keyboardEnd = ref(84)
+const showSettings = ref(false)
+
+// Mouse hover state
+const hoverCanvas = ref<string | null>(null)
+const hoverX = ref(0)
+const hoverY = ref(0)
+
+function handleCanvasMove(canvas: string, e: MouseEvent) {
+  const target = e.target as HTMLCanvasElement
+  const rect = target.getBoundingClientRect()
+  const scale = window.devicePixelRatio || 1
+  hoverCanvas.value = canvas
+  hoverX.value = (e.clientX - rect.left) * scale
+  hoverY.value = (e.clientY - rect.top) * scale
+}
+
+function handleCanvasLeave() {
+  hoverCanvas.value = null
+}
+
+const paramHelp: Record<string, { title: string; desc: string }> = {
+  zoom: {
+    title: 'Zoom de forma de onda',
+    desc: 'Porcentaje del buffer de audio visible. Al 100% ves toda la ventana. Valores bajos hacen zoom para ver ciclos individuales de la onda.'
+  },
+  db: {
+    title: 'Sensibilidad (dB)',
+    desc: 'Umbral minimo de decibelios. Valores mas negativos (-120) muestran sonidos mas debiles. Util para ver armonicos suaves.'
+  },
+  fft: {
+    title: 'Tamano FFT',
+    desc: 'Muestras para la Transformada de Fourier. Valores altos (4096+) dan mejor resolucion en frecuencia. Valores bajos (256) responden mas rapido pero distinguen peor frecuencias cercanas.'
+  },
+  barras: {
+    title: 'Barras del espectro',
+    desc: 'Numero de barras en el analizador de espectro. Mas barras = mas detalle visual.'
+  },
+  peak: {
+    title: 'Retencion de picos',
+    desc: 'Marca el nivel maximo alcanzado en cada barra con una linea amarilla que decae lentamente. Util para ver la envolvente espectral.'
+  },
+  linea: {
+    title: 'Modo linea',
+    desc: 'Dibuja el espectro como una curva continua en vez de barras. Util para ver la forma general del espectro con mas claridad.'
+  },
+  log: {
+    title: 'Escala logaritmica',
+    desc: 'Aplica escala log al eje de frecuencias del espectrograma. Imita la percepcion del oido: mas resolucion en graves, menos en agudos.'
+  },
+  ventana: {
+    title: 'Ventana temporal',
+    desc: 'Ciclos del patron visibles hacia atras en el piano roll. Valores altos muestran mas contexto musical.'
+  },
+  spiral: {
+    title: 'Mostrar espiral',
+    desc: 'La espiral muestra la secuencia temporal de notas enrollada. Util para patrones con poliritmia. Ocultarla da mas espacio al piano roll.'
+  },
+  punchcard: {
+    title: 'Modo Punchcard',
+    desc: 'Muestra solo las notas que aparecen en el patron, sin huecos entre ellas. Mas compacto y legible para patrones con pocas notas distintas.'
+  },
+  solfeo: {
+    title: 'Notacion Solfeo',
+    desc: 'Cambia entre notacion americana (C, D, E...) y solfeo latino (Do, Re, Mi...).'
+  },
+  kbLabels: {
+    title: 'Mostrar etiquetas',
+    desc: 'Muestra el nombre de la nota en todas las teclas, no solo en las activas y en Do.'
+  },
+  kbMidi: {
+    title: 'Numeros MIDI',
+    desc: 'Muestra el numero MIDI (0-127) en vez del nombre de la nota. Util para entender la numeracion MIDI.'
+  },
+  kbOctava: {
+    title: 'Octava inicial',
+    desc: 'Primera octava visible en el teclado. Cada octava tiene 12 semitonos (7 teclas blancas + 5 negras).'
+  },
+  kbOctavas: {
+    title: 'Numero de octavas',
+    desc: 'Cuantas octavas muestra el teclado. Mas octavas = teclas mas pequeñas.'
+  }
+}
+
+function closeOpenHelp(e: Event) {
+  document.querySelectorAll('.param-help[open]').forEach(el => {
+    if (!el.contains(e.target as Node)) {
+      el.removeAttribute('open')
+    }
+  })
+}
+
+// Spectrogram clean state (before crosshair)
+let spectrogramClean: ImageData | null = null
+
+// Peak hold data
+let peakValues: Float32Array | null = null
+const PEAK_DECAY = 0.3
+
 const AXIS_WIDTH = 45
-const AXIS_HEIGHT = 20
+const AXIS_HEIGHT = 24
+
+// Detección de pitch
+const detectedPitch = ref<{ freq: number; note: string; cents: number } | null>(null)
+
+function detectPitch(data: Float32Array, sampleRate: number): { freq: number; note: string; cents: number } | null {
+  const n = data.length
+  let rms = 0
+  for (let i = 0; i < n; i++) rms += data[i] * data[i]
+  rms = Math.sqrt(rms / n)
+  if (rms < 0.01) return null
+
+  // Autocorrelación
+  const corr = new Float32Array(n)
+  for (let lag = 0; lag < n; lag++) {
+    let sum = 0
+    for (let i = 0; i < n - lag; i++) sum += data[i] * data[i + lag]
+    corr[lag] = sum
+  }
+
+  // Buscar primer valle después del pico en lag=0
+  let d = 0
+  while (d < n - 1 && corr[d] > corr[d + 1]) d++
+
+  // Buscar pico máximo después del valle
+  let maxVal = -1
+  let maxLag = d
+  for (let i = d; i < n - 1; i++) {
+    if (corr[i] > maxVal) {
+      maxVal = corr[i]
+      maxLag = i
+    }
+    if (corr[i] > corr[i + 1] && maxVal > 0.3 * corr[0]) break
+  }
+
+  if (maxLag === 0 || maxVal < 0.2 * corr[0]) return null
+
+  // Interpolación parabólica para mayor precisión
+  const y0 = maxLag > 0 ? corr[maxLag - 1] : corr[maxLag]
+  const y1 = corr[maxLag]
+  const y2 = maxLag < n - 1 ? corr[maxLag + 1] : corr[maxLag]
+  const shift = (y0 - y2) / (2 * (y0 - 2 * y1 + y2))
+  const refinedLag = maxLag + (isFinite(shift) ? shift : 0)
+
+  const freq = sampleRate / refinedLag
+  if (freq < 20 || freq > 5000) return null
+
+  const midi = 69 + 12 * Math.log2(freq / 440)
+  const roundedMidi = Math.round(midi)
+  const cents = Math.round((midi - roundedMidi) * 100)
+  const names = solfeo.value ? NOTE_NAMES_SOL : NOTE_NAMES_EN
+  const noteName = names[((roundedMidi % 12) + 12) % 12]
+  const octave = Math.floor(roundedMidi / 12) - 1
+
+  return { freq, note: `${noteName}${octave}`, cents }
+}
 
 // Eventos de notas para piano roll
 type NoteEvent = { time: number; dur: number; midi?: number }
 let events: NoteEvent[] = []
 
 // Notas para el piano roll
-const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+const NOTE_NAMES_EN = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+const NOTE_NAMES_SOL = ['Do', 'Do#', 'Re', 'Re#', 'Mi', 'Fa', 'Fa#', 'Sol', 'Sol#', 'La', 'La#', 'Si']
 function midiToNoteName(midi: number): string {
-  const note = NOTE_NAMES[midi % 12]
+  const names = solfeo.value ? NOTE_NAMES_SOL : NOTE_NAMES_EN
+  const note = names[midi % 12]
   const octave = Math.floor(midi / 12) - 1
   return `${note}${octave}`
+}
+
+function drawCrosshair(ctx: CanvasRenderingContext2D, mx: number, my: number, label: string, plotX: number, plotHeight: number, showH: boolean = true, showV: boolean = true) {
+  ctx.save()
+  ctx.setLineDash([4, 4])
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)'
+  ctx.lineWidth = 1
+  if (showH && my >= 0 && my <= plotHeight) {
+    ctx.beginPath()
+    ctx.moveTo(plotX, my)
+    ctx.lineTo(ctx.canvas.width, my)
+    ctx.stroke()
+  }
+  if (showV && mx >= plotX) {
+    ctx.beginPath()
+    ctx.moveTo(mx, 0)
+    ctx.lineTo(mx, plotHeight)
+    ctx.stroke()
+  }
+  ctx.setLineDash([])
+
+  if (label) {
+    const dpr = window.devicePixelRatio || 1
+    ctx.font = `${11 * dpr}px monospace`
+    const metrics = ctx.measureText(label)
+    const pad = 4 * dpr
+    const lw = metrics.width + pad * 2
+    const lh = 14 * dpr
+    let lx = mx + 10 * dpr
+    let ly = my - lh - 6 * dpr
+    if (lx + lw > ctx.canvas.width) lx = mx - lw - 10 * dpr
+    if (ly < 0) ly = my + 6 * dpr
+    ctx.fillStyle = 'rgba(30, 41, 59, 0.9)'
+    ctx.fillRect(lx, ly, lw, lh)
+    ctx.fillStyle = '#e2e8f0'
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(label, lx + pad, ly + lh / 2)
+  }
+  ctx.restore()
 }
 
 function resizeCanvas(canvas: HTMLCanvasElement) {
@@ -49,7 +263,7 @@ function resizeCanvas(canvas: HTMLCanvasElement) {
   }
 }
 
-function drawWaveform(ctx: CanvasRenderingContext2D, data: Float32Array) {
+function drawWaveform(ctx: CanvasRenderingContext2D, data: Float32Array, zoomPct: number, mx: number | null, my: number | null, pitch: { freq: number; note: string; cents: number } | null) {
   const { width, height } = ctx.canvas
   const plotX = AXIS_WIDTH
   const plotWidth = width - AXIS_WIDTH
@@ -91,12 +305,13 @@ function drawWaveform(ctx: CanvasRenderingContext2D, data: Float32Array) {
   ctx.restore()
 
   // Dibujar waveform
+  const sampleCount = Math.max(1, Math.floor(data.length * zoomPct / 100))
   ctx.beginPath()
   ctx.strokeStyle = '#22d3ee'
   ctx.lineWidth = 2
-  const slice = plotWidth / data.length
+  const slice = plotWidth / sampleCount
   let x = plotX
-  for (let i = 0; i < data.length; i++) {
+  for (let i = 0; i < sampleCount; i++) {
     const v = (data[i] + 1) / 2
     const y = (1 - v) * plotHeight
     if (i === 0) ctx.moveTo(x, y)
@@ -108,10 +323,32 @@ function drawWaveform(ctx: CanvasRenderingContext2D, data: Float32Array) {
   // Etiqueta inferior
   ctx.fillStyle = '#64748b'
   ctx.textAlign = 'center'
-  ctx.fillText('Tiempo', plotX + plotWidth / 2, height - 5)
+  ctx.fillText('Tiempo', plotX + plotWidth / 2, plotHeight + AXIS_HEIGHT / 2)
+
+  if (mx !== null && my !== null && mx >= plotX && my <= plotHeight) {
+    const amp = 1 - (my / plotHeight) * 2
+    drawCrosshair(ctx, mx, my, `${amp.toFixed(2)}`, plotX, plotHeight, true, false)
+  }
+
+  // Pitch detection overlay
+  if (pitch) {
+    const dpr = window.devicePixelRatio || 1
+    const centsStr = pitch.cents >= 0 ? `+${pitch.cents}` : `${pitch.cents}`
+    const text = `${pitch.note} ${pitch.freq.toFixed(1)}Hz ${centsStr}¢`
+    ctx.font = `bold ${12 * dpr}px monospace`
+    const tw = ctx.measureText(text).width
+    const px = plotX + 6 * dpr
+    const py = 6 * dpr
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.8)'
+    ctx.fillRect(px - 4 * dpr, py - 2 * dpr, tw + 8 * dpr, 16 * dpr)
+    ctx.fillStyle = '#4ade80'
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'top'
+    ctx.fillText(text, px, py)
+  }
 }
 
-function drawSpectrum(ctx: CanvasRenderingContext2D, data: Float32Array, sampleRate: number) {
+function drawSpectrum(ctx: CanvasRenderingContext2D, data: Float32Array, sampleRate: number, MIN_DB: number, MAX_DB: number, barCount: number, peaks: Float32Array | null, lineMode: boolean, mx: number | null, my: number | null) {
   const { width, height } = ctx.canvas
   const plotX = AXIS_WIDTH
   const plotWidth = width - AXIS_WIDTH
@@ -153,7 +390,7 @@ function drawSpectrum(ctx: CanvasRenderingContext2D, data: Float32Array, sampleR
 
   // Eje X (frecuencia logarítmica)
   ctx.textAlign = 'center'
-  ctx.textBaseline = 'top'
+  ctx.textBaseline = 'middle'
   const freqLabels = [100, 500, 1000, 5000, 10000]
   const nyquist = sampleRate / 2
 
@@ -162,7 +399,7 @@ function drawSpectrum(ctx: CanvasRenderingContext2D, data: Float32Array, sampleR
     const x = plotX + logPos * plotWidth
     if (x > plotX && x < width) {
       ctx.fillStyle = '#64748b'
-      ctx.fillText(freq >= 1000 ? `${freq/1000}k` : `${freq}`, x, plotHeight + 3)
+      ctx.fillText(freq >= 1000 ? `${freq/1000}k` : `${freq}`, x, plotHeight + AXIS_HEIGHT / 2)
 
       ctx.strokeStyle = 'rgba(148, 163, 184, 0.1)'
       ctx.beginPath()
@@ -174,34 +411,79 @@ function drawSpectrum(ctx: CanvasRenderingContext2D, data: Float32Array, sampleR
 
   // Etiqueta Hz
   ctx.fillStyle = '#64748b'
-  ctx.fillText('Hz', width - 15, plotHeight + 3)
+  ctx.fillText('Hz', width - 15, plotHeight + AXIS_HEIGHT / 2)
 
-  // Dibujar barras del espectro (escala logarítmica)
-  const numBars = 64
-  for (let i = 0; i < numBars; i++) {
-    const logFreq = 20 * Math.pow(nyquist / 20, i / numBars)
-    const binIndex = Math.floor((logFreq / nyquist) * data.length)
-    if (binIndex >= data.length) continue
+  // Dibujar espectro (escala logarítmica)
+  if (lineMode) {
+    ctx.beginPath()
+    ctx.strokeStyle = '#22d3ee'
+    ctx.lineWidth = 2
+    for (let i = 0; i < barCount; i++) {
+      const logFreq = 20 * Math.pow(nyquist / 20, i / barCount)
+      const binIndex = Math.floor((logFreq / nyquist) * data.length)
+      if (binIndex >= data.length) continue
+      const magnitude = (data[binIndex] - MIN_DB) / (MAX_DB - MIN_DB)
+      const clamped = Math.min(Math.max(magnitude, 0), 1)
+      const x = plotX + (i / barCount) * plotWidth
+      const y = plotHeight - clamped * plotHeight
+      if (i === 0) ctx.moveTo(x, y)
+      else ctx.lineTo(x, y)
+    }
+    ctx.stroke()
 
-    const magnitude = (data[binIndex] - MIN_DB) / (MAX_DB - MIN_DB)
-    const clamped = Math.min(Math.max(magnitude, 0), 1)
+    // Fill bajo la línea
+    ctx.lineTo(plotX + plotWidth, plotHeight)
+    ctx.lineTo(plotX, plotHeight)
+    ctx.closePath()
+    ctx.fillStyle = 'rgba(34, 211, 238, 0.1)'
+    ctx.fill()
+  } else {
+    for (let i = 0; i < barCount; i++) {
+      const logFreq = 20 * Math.pow(nyquist / 20, i / barCount)
+      const binIndex = Math.floor((logFreq / nyquist) * data.length)
+      if (binIndex >= data.length) continue
+      const magnitude = (data[binIndex] - MIN_DB) / (MAX_DB - MIN_DB)
+      const clamped = Math.min(Math.max(magnitude, 0), 1)
+      const x = plotX + (i / barCount) * plotWidth
+      const barWidth = plotWidth / barCount - 1
+      const barHeight = clamped * plotHeight
+      const hue = 180 - clamped * 60
+      ctx.fillStyle = `hsla(${hue}, 80%, ${40 + clamped * 30}%, ${0.5 + clamped * 0.5})`
+      ctx.fillRect(x, plotHeight - barHeight, Math.max(1, barWidth), barHeight)
+    }
+  }
 
-    const x = plotX + (i / numBars) * plotWidth
-    const barWidth = plotWidth / numBars - 1
-    const barHeight = clamped * plotHeight
+  // Peak hold
+  if (peaks) {
+    for (let i = 0; i < barCount; i++) {
+      if (i >= peaks.length) break
+      const peakHeight = peaks[i] * plotHeight
+      const x = plotX + (i / barCount) * plotWidth
+      const barWidth = lineMode ? 2 : plotWidth / barCount - 1
+      ctx.fillStyle = '#f59e0b'
+      ctx.fillRect(x, plotHeight - peakHeight, Math.max(1, barWidth), 2)
+    }
+  }
 
-    // Gradiente de color según intensidad
-    const hue = 180 - clamped * 60 // cyan a verde
-    ctx.fillStyle = `hsla(${hue}, 80%, ${40 + clamped * 30}%, ${0.5 + clamped * 0.5})`
-    ctx.fillRect(x, plotHeight - barHeight, Math.max(1, barWidth), barHeight)
+  if (mx !== null && my !== null && mx >= plotX && my <= plotHeight) {
+    const freqNorm = (mx - plotX) / plotWidth
+    const freq = 20 * Math.pow(nyquist / 20, freqNorm)
+    const db = MAX_DB + (my / plotHeight) * (MIN_DB - MAX_DB)
+    const freqStr = freq >= 1000 ? `${(freq / 1000).toFixed(1)}kHz` : `${Math.round(freq)}Hz`
+    drawCrosshair(ctx, mx, my, `${freqStr}  ${db.toFixed(0)}dB`, plotX, plotHeight)
   }
 }
 
-function drawSpectrogram(ctx: CanvasRenderingContext2D, data: Float32Array, sampleRate: number) {
+function drawSpectrogram(ctx: CanvasRenderingContext2D, data: Float32Array, sampleRate: number, MIN_DB: number, MAX_DB: number, logScale: boolean, mx: number | null, my: number | null) {
   const { width, height } = ctx.canvas
   const plotX = AXIS_WIDTH
   const plotWidth = width - AXIS_WIDTH
   const plotHeight = height - AXIS_HEIGHT
+
+  // Restaurar estado limpio (sin crosshair del frame anterior) antes de scrollear
+  if (spectrogramClean) {
+    ctx.putImageData(spectrogramClean, 0, 0)
+  }
 
   // Mover imagen anterior
   const imageData = ctx.getImageData(plotX + 1, 0, plotWidth - 1, plotHeight)
@@ -222,7 +504,9 @@ function drawSpectrogram(ctx: CanvasRenderingContext2D, data: Float32Array, samp
   const nyquist = sampleRate / 2
 
   for (const freq of freqLabels) {
-    const y = (1 - freq / nyquist) * plotHeight
+    const y = logScale
+      ? (1 - Math.log10(freq / 20) / Math.log10(nyquist / 20)) * plotHeight
+      : (1 - freq / nyquist) * plotHeight
     if (y > 10 && y < plotHeight - 10) {
       ctx.fillText(freq >= 1000 ? `${freq/1000}k` : `${freq}`, plotX - 5, y)
     }
@@ -239,8 +523,17 @@ function drawSpectrogram(ctx: CanvasRenderingContext2D, data: Float32Array, samp
 
   // Dibujar columna nueva
   const x = width - 1
+  const logNyquist = Math.log10(nyquist / 20)
   for (let y = 0; y < plotHeight; y++) {
-    const index = Math.floor((1 - y / plotHeight) * (data.length - 1))
+    let index: number
+    if (logScale) {
+      const freqNorm = 1 - y / plotHeight
+      const freq = 20 * Math.pow(10, freqNorm * logNyquist)
+      index = Math.floor((freq / nyquist) * (data.length - 1))
+    } else {
+      index = Math.floor((1 - y / plotHeight) * (data.length - 1))
+    }
+    index = Math.min(Math.max(index, 0), data.length - 1)
     const magnitude = (data[index] - MIN_DB) / (MAX_DB - MIN_DB)
     const clamped = Math.min(Math.max(magnitude, 0), 1)
 
@@ -267,78 +560,110 @@ function drawSpectrogram(ctx: CanvasRenderingContext2D, data: Float32Array, samp
   // Leyenda de colores
   ctx.fillStyle = '#64748b'
   ctx.textAlign = 'center'
-  ctx.fillText('Tiempo →', plotX + plotWidth / 2, height - 5)
+  ctx.fillText('Tiempo →', plotX + plotWidth / 2, plotHeight + AXIS_HEIGHT / 2)
+
+  // Guardar estado limpio antes del crosshair
+  spectrogramClean = ctx.getImageData(0, 0, width, height)
+
+  if (mx !== null && my !== null && mx >= plotX && my <= plotHeight) {
+    let freq: number
+    if (logScale) {
+      const freqNorm = 1 - my / plotHeight
+      freq = 20 * Math.pow(10, freqNorm * logNyquist)
+    } else {
+      freq = (1 - my / plotHeight) * nyquist
+    }
+    const freqStr = freq >= 1000 ? `${(freq / 1000).toFixed(1)}kHz` : `${Math.round(freq)}Hz`
+    drawCrosshair(ctx, mx, my, freqStr, plotX, plotHeight, true, false)
+  }
 }
 
-function drawPianoRoll(ctx: CanvasRenderingContext2D, now: number) {
-  // now está en ciclos (de getSchedulerTime)
+function drawPianoRoll(ctx: CanvasRenderingContext2D, now: number, lookbehind: number, mx: number | null, my: number | null, fold: boolean) {
   const { width, height } = ctx.canvas
   const plotX = AXIS_WIDTH
   const plotWidth = width - AXIS_WIDTH
   const plotHeight = height - AXIS_HEIGHT
 
-  // Ventana de tiempo en ciclos (2 ciclos hacia atrás, 0.5 hacia adelante)
-  const lookbehind = 2
-  const lookahead = 0.5
+  const lookahead = Math.max(lookbehind * 0.25, 0.5)
   const windowCycles = lookbehind + lookahead
   const timeStart = now - lookbehind
 
   ctx.clearRect(0, 0, width, height)
 
-  // Fondo
   ctx.fillStyle = 'rgba(15, 23, 42, 0.95)'
   ctx.fillRect(plotX, 0, plotWidth, plotHeight)
 
-  // Autorange: calcular min/max MIDI de los eventos visibles
   const visibleEvents = events.filter(e => e.midi !== undefined)
-  let pitchMin = 48  // C3 default
-  let pitchMax = 84  // C6 default
 
-  if (visibleEvents.length > 0) {
-    const midiValues = visibleEvents.map(e => e.midi!)
-    const minMidi = Math.min(...midiValues)
-    const maxMidi = Math.max(...midiValues)
-    // Añadir margen de una octava
-    pitchMin = Math.max(0, Math.floor((minMidi - 6) / 12) * 12)
-    pitchMax = Math.min(127, Math.ceil((maxMidi + 6) / 12) * 12)
-    // Mínimo rango de 2 octavas
-    if (pitchMax - pitchMin < 24) {
-      const mid = (pitchMin + pitchMax) / 2
-      pitchMin = Math.max(0, Math.floor(mid - 12))
-      pitchMax = Math.min(127, Math.ceil(mid + 12))
+  // Punchcard: solo valores únicos; Piano roll: rango continuo
+  let uniquePitches: number[] = []
+  let pitchMin = 48
+  let pitchMax = 84
+  let pitchRange = pitchMax - pitchMin
+
+  if (fold) {
+    const pitchSet = new Set(visibleEvents.map(e => e.midi!))
+    uniquePitches = [...pitchSet].sort((a, b) => a - b)
+    if (uniquePitches.length === 0) uniquePitches = [60]
+  } else {
+    if (visibleEvents.length > 0) {
+      const midiValues = visibleEvents.map(e => e.midi!)
+      const minMidi = Math.min(...midiValues)
+      const maxMidi = Math.max(...midiValues)
+      pitchMin = Math.max(0, Math.floor((minMidi - 6) / 12) * 12)
+      pitchMax = Math.min(127, Math.ceil((maxMidi + 6) / 12) * 12)
+      if (pitchMax - pitchMin < 24) {
+        const mid = (pitchMin + pitchMax) / 2
+        pitchMin = Math.max(0, Math.floor(mid - 12))
+        pitchMax = Math.min(127, Math.ceil(mid + 12))
+      }
     }
+    pitchRange = pitchMax - pitchMin
   }
-
-  const pitchRange = pitchMax - pitchMin
 
   ctx.fillStyle = '#94a3b8'
   ctx.font = `${10 * (window.devicePixelRatio || 1)}px sans-serif`
   ctx.textAlign = 'right'
   ctx.textBaseline = 'middle'
 
-  // Dibujar líneas de octava y notas C
-  for (let midi = pitchMin; midi <= pitchMax; midi++) {
-    const pitchNorm = (midi - pitchMin) / pitchRange
-    const y = plotHeight - pitchNorm * plotHeight
+  const rowCount = fold ? uniquePitches.length : pitchRange
+  const noteHeight = fold
+    ? Math.max(Math.min(plotHeight / (uniquePitches.length + 1), plotHeight * 0.15), 6)
+    : Math.max(plotHeight / pitchRange, 6)
 
-    if (midi % 12 === 0) { // Nota C
-      // Línea de octava
-      ctx.strokeStyle = 'rgba(148, 163, 184, 0.4)'
+  if (fold) {
+    // Punchcard: una fila por nota única
+    for (let i = 0; i < uniquePitches.length; i++) {
+      const y = plotHeight - ((i + 0.5) / uniquePitches.length) * plotHeight
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)'
       ctx.lineWidth = 1
       ctx.beginPath()
       ctx.moveTo(plotX, y)
       ctx.lineTo(width, y)
       ctx.stroke()
-
-      // Etiqueta
       ctx.fillStyle = '#94a3b8'
-      ctx.fillText(midiToNoteName(midi), plotX - 5, y)
-    } else if (midi % 12 === 4 || midi % 12 === 7) { // E y G
-      ctx.strokeStyle = 'rgba(148, 163, 184, 0.15)'
-      ctx.beginPath()
-      ctx.moveTo(plotX, y)
-      ctx.lineTo(width, y)
-      ctx.stroke()
+      ctx.fillText(midiToNoteName(uniquePitches[i]), plotX - 5, y)
+    }
+  } else {
+    for (let midi = pitchMin; midi <= pitchMax; midi++) {
+      const pitchNorm = (midi - pitchMin) / pitchRange
+      const y = plotHeight - pitchNorm * plotHeight
+      if (midi % 12 === 0) {
+        ctx.strokeStyle = 'rgba(148, 163, 184, 0.4)'
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(plotX, y)
+        ctx.lineTo(width, y)
+        ctx.stroke()
+        ctx.fillStyle = '#94a3b8'
+        ctx.fillText(midiToNoteName(midi), plotX - 5, y)
+      } else if (midi % 12 === 4 || midi % 12 === 7) {
+        ctx.strokeStyle = 'rgba(148, 163, 184, 0.15)'
+        ctx.beginPath()
+        ctx.moveTo(plotX, y)
+        ctx.lineTo(width, y)
+        ctx.stroke()
+      }
     }
   }
 
@@ -351,7 +676,7 @@ function drawPianoRoll(ctx: CanvasRenderingContext2D, now: number) {
   ctx.fillText('Nota', 0, 0)
   ctx.restore()
 
-  // Grid vertical (tiempo) - una línea por cada medio ciclo
+  // Grid vertical
   ctx.strokeStyle = 'rgba(148, 163, 184, 0.1)'
   const gridLines = Math.ceil(windowCycles * 2)
   for (let i = 0; i <= gridLines; i++) {
@@ -362,7 +687,6 @@ function drawPianoRoll(ctx: CanvasRenderingContext2D, now: number) {
     ctx.stroke()
   }
 
-  // Playhead position (now está en posición relativa a lookbehind/lookahead)
   const playheadX = plotX + (lookbehind / windowCycles) * plotWidth
 
   // Dibujar notas
@@ -370,27 +694,29 @@ function drawPianoRoll(ctx: CanvasRenderingContext2D, now: number) {
     if (event.midi === undefined) continue
     const x = plotX + ((event.time - timeStart) / windowCycles) * plotWidth
     const w = Math.max((event.dur / windowCycles) * plotWidth, 4)
-    const pitchNorm = Math.min(Math.max((event.midi - pitchMin) / pitchRange, 0), 1)
-    const noteHeight = Math.max(plotHeight / pitchRange, 6)
-    const y = plotHeight - pitchNorm * plotHeight - noteHeight / 2
+
+    let y: number
+    if (fold) {
+      const idx = uniquePitches.indexOf(event.midi)
+      if (idx === -1) continue
+      y = plotHeight - ((idx + 0.5) / uniquePitches.length) * plotHeight - noteHeight / 2
+    } else {
+      const pitchNorm = Math.min(Math.max((event.midi - pitchMin) / pitchRange, 0), 1)
+      y = plotHeight - pitchNorm * plotHeight - noteHeight / 2
+    }
 
     const isActive = event.time <= now && event.time + event.dur > now
-
-    // Color según la nota (arcoíris por octava)
     const hue = (event.midi % 12) * 30
     ctx.fillStyle = isActive
       ? `hsla(${hue}, 80%, 60%, 0.95)`
       : `hsla(${hue}, 60%, 50%, 0.8)`
     ctx.fillRect(x, y, w, noteHeight)
-
-    // Borde más visible para notas activas
     ctx.strokeStyle = isActive
       ? `hsla(${hue}, 90%, 75%, 1)`
       : `hsla(${hue}, 70%, 40%, 1)`
     ctx.lineWidth = isActive ? 2 : 1
     ctx.strokeRect(x, y, w, noteHeight)
 
-    // Label de la nota (solo si hay espacio suficiente)
     if (w > 20 && noteHeight > 10) {
       const noteName = midiToNoteName(event.midi)
       ctx.fillStyle = isActive ? '#000' : 'rgba(0,0,0,0.7)'
@@ -401,7 +727,7 @@ function drawPianoRoll(ctx: CanvasRenderingContext2D, now: number) {
     }
   }
 
-  // Línea "Now" (playhead)
+  // Playhead
   ctx.strokeStyle = '#f59e0b'
   ctx.lineWidth = 2
   ctx.beginPath()
@@ -412,7 +738,21 @@ function drawPianoRoll(ctx: CanvasRenderingContext2D, now: number) {
   // Etiqueta inferior
   ctx.fillStyle = '#64748b'
   ctx.textAlign = 'center'
-  ctx.fillText('Tiempo →', plotX + plotWidth / 2, height - 5)
+  ctx.fillText('Tiempo →', plotX + plotWidth / 2, plotHeight + AXIS_HEIGHT / 2)
+
+  if (mx !== null && my !== null && mx >= plotX && my <= plotHeight) {
+    let label: string
+    if (fold && uniquePitches.length > 0) {
+      const idx = Math.round((1 - my / plotHeight) * uniquePitches.length - 0.5)
+      const clamped = Math.min(Math.max(idx, 0), uniquePitches.length - 1)
+      label = midiToNoteName(uniquePitches[clamped])
+    } else {
+      const pitchNorm = 1 - my / plotHeight
+      const midi = Math.round(pitchMin + pitchNorm * pitchRange)
+      label = midiToNoteName(Math.min(Math.max(midi, 0), 127))
+    }
+    drawCrosshair(ctx, mx, my, label, plotX, plotHeight, true, false)
+  }
 }
 
 // Función auxiliar para coordenadas polares
@@ -521,7 +861,7 @@ function drawPitchwheel(ctx: CanvasRenderingContext2D, now: number) {
   const hapRadius = size * 0.04
 
   // Nombres de las notas en el círculo
-  const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+  const noteNames = solfeo.value ? NOTE_NAMES_SOL : NOTE_NAMES_EN
 
   // Dibujar los 12 puntos del círculo (semitonos)
   ctx.fillStyle = '#475569'
@@ -592,6 +932,201 @@ function drawPitchwheel(ctx: CanvasRenderingContext2D, now: number) {
   ctx.fillText('Pitchwheel', width / 2, height - 8)
 }
 
+const CHORD_TYPES: [number[], string][] = [
+  // Triadas
+  [[0, 4, 7], 'maj'],
+  [[0, 3, 7], 'm'],
+  [[0, 3, 6], 'dim'],
+  [[0, 4, 8], 'aug'],
+  [[0, 2, 7], 'sus2'],
+  [[0, 5, 7], 'sus4'],
+  [[0, 7], '5'],
+  // Séptimas
+  [[0, 4, 7, 11], 'maj7'],
+  [[0, 3, 7, 10], 'm7'],
+  [[0, 4, 7, 10], '7'],
+  [[0, 3, 6, 9], 'dim7'],
+  [[0, 3, 6, 10], 'm7b5'],
+  [[0, 3, 7, 11], 'mMaj7'],
+  [[0, 4, 8, 10], 'aug7'],
+  // Sextas
+  [[0, 4, 7, 9], '6'],
+  [[0, 3, 7, 9], 'm6'],
+  // Novenas (sin 5ta implícita)
+  [[0, 4, 7, 10, 14], '9'],
+  [[0, 3, 7, 10, 14], 'm9'],
+  [[0, 4, 7, 11, 14], 'maj9'],
+  // Add
+  [[0, 2, 4, 7], 'add9'],
+  [[0, 4, 5, 7], 'add4'],
+]
+
+function detectChord(midiNotes: number[]): string | null {
+  if (midiNotes.length < 2) return null
+
+  const pitchClasses = [...new Set(midiNotes.map(n => Math.round(n) % 12))].sort((a, b) => a - b)
+  if (pitchClasses.length < 2) return null
+
+  const names = solfeo.value ? NOTE_NAMES_SOL : NOTE_NAMES_EN
+  let bestMatch: string | null = null
+  let bestScore = 0
+
+  for (const root of pitchClasses) {
+    const intervals = pitchClasses.map(p => (p - root + 12) % 12).sort((a, b) => a - b)
+
+    for (const [pattern, suffix] of CHORD_TYPES) {
+      if (pattern.length > intervals.length) continue
+      const matches = pattern.every(i => intervals.includes(i))
+      if (matches && pattern.length > bestScore) {
+        bestScore = pattern.length
+        const rootName = names[root]
+        bestMatch = `${rootName}${suffix}`
+        if (intervals[0] !== 0) {
+          const bassNote = names[pitchClasses[0]]
+          bestMatch += `/${bassNote}`
+        }
+      }
+    }
+  }
+
+  return bestMatch
+}
+
+function drawKeyboard(ctx: CanvasRenderingContext2D, now: number, startMidi: number, endMidi: number, kbEvents: NoteEvent[], labels: boolean, midiNumbers: boolean) {
+  const { width, height } = ctx.canvas
+  ctx.clearRect(0, 0, width, height)
+
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.95)'
+  ctx.fillRect(0, 0, width, height)
+
+  const dpr = window.devicePixelRatio || 1
+  const labelHeight = 18 * dpr
+
+  // Contar teclas blancas en el rango
+  const isBlack = [false, true, false, true, false, false, true, false, true, false, true, false]
+  let whiteCount = 0
+  for (let m = startMidi; m < endMidi; m++) {
+    if (!isBlack[m % 12]) whiteCount++
+  }
+  if (whiteCount === 0) return
+
+  const whiteWidth = width / whiteCount
+  const whiteHeight = height - labelHeight
+  const blackWidth = whiteWidth * 0.6
+  const blackHeight = whiteHeight * 0.63
+
+  // Notas activas (enteras y fraccionarias con intensidad)
+  const activeNotes = new Set<number>()
+  const microtonalNotes = new Map<number, number>()
+  for (const e of kbEvents) {
+    if (e.midi !== undefined && e.time <= now && e.time + e.dur > now) {
+      if (e.midi % 1 === 0) {
+        activeNotes.add(e.midi)
+      } else {
+        const frac = e.midi - Math.floor(e.midi)
+        const lo = Math.floor(e.midi)
+        const hi = Math.ceil(e.midi)
+        const loIntensity = 1 - frac
+        const hiIntensity = frac
+        microtonalNotes.set(lo, Math.max(microtonalNotes.get(lo) || 0, loIntensity))
+        microtonalNotes.set(hi, Math.max(microtonalNotes.get(hi) || 0, hiIntensity))
+      }
+    }
+  }
+
+  const names = solfeo.value ? NOTE_NAMES_SOL : NOTE_NAMES_EN
+  const fontSize = Math.min(11 * dpr, whiteWidth * 0.4)
+  const smallFontSize = Math.min(9 * dpr, blackWidth * 0.5)
+
+  // Dibujar teclas blancas
+  let wx = 0
+  for (let m = startMidi; m < endMidi; m++) {
+    if (isBlack[m % 12]) continue
+    const active = activeNotes.has(m)
+    const microInt = microtonalNotes.get(m)
+    const micro = microInt !== undefined
+    if (active) {
+      ctx.fillStyle = '#3b82f6'
+    } else if (micro) {
+      const alpha = 0.3 + microInt * 0.7
+      ctx.fillStyle = `rgba(245, 158, 11, ${alpha})`
+    } else {
+      ctx.fillStyle = '#f1f5f9'
+    }
+    ctx.fillRect(wx, 0, whiteWidth - 1, whiteHeight)
+    ctx.strokeStyle = '#94a3b8'
+    ctx.lineWidth = 1
+    ctx.strokeRect(wx, 0, whiteWidth - 1, whiteHeight)
+
+    if (labels || m % 12 === 0 || active || micro) {
+      const label = midiNumbers ? String(m) : `${names[m % 12]}${Math.floor(m / 12) - 1}`
+      ctx.font = `bold ${fontSize}px sans-serif`
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'bottom'
+      ctx.fillStyle = (active || (micro && microInt > 0.4)) ? '#fff' : '#475569'
+      ctx.fillText(label, wx + (whiteWidth - 1) / 2, whiteHeight - 4 * dpr)
+    }
+    wx += whiteWidth
+  }
+
+  // Dibujar teclas negras
+  wx = 0
+  for (let m = startMidi; m < endMidi; m++) {
+    if (isBlack[m % 12]) {
+      const active = activeNotes.has(m)
+      const microInt = microtonalNotes.get(m)
+      const micro = microInt !== undefined
+      const bx = wx - blackWidth / 2
+      if (active) {
+        ctx.fillStyle = '#60a5fa'
+      } else if (micro) {
+        const r = Math.round(30 + microInt * 187)
+        const g = Math.round(41 + microInt * 78)
+        const b = Math.round(59 - microInt * 53)
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`
+      } else {
+        ctx.fillStyle = '#1e293b'
+      }
+      ctx.fillRect(bx, 0, blackWidth, blackHeight)
+      ctx.strokeStyle = '#0f172a'
+      ctx.lineWidth = 1
+      ctx.strokeRect(bx, 0, blackWidth, blackHeight)
+
+      if (labels || active || micro) {
+        const label = midiNumbers ? String(m) : names[m % 12]
+        ctx.fillStyle = '#fff'
+        ctx.font = `bold ${smallFontSize}px sans-serif`
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'bottom'
+        ctx.fillText(label, bx + blackWidth / 2, blackHeight - 3 * dpr)
+      }
+    } else {
+      wx += whiteWidth
+    }
+  }
+
+  // Detección de acorde
+  const activeMidis = [...activeNotes]
+  for (const e of kbEvents) {
+    if (e.midi !== undefined && e.midi % 1 !== 0 && e.time <= now && e.time + e.dur > now) {
+      activeMidis.push(e.midi)
+    }
+  }
+  const chord = detectChord(activeMidis)
+  if (chord) {
+    ctx.font = `bold ${16 * dpr}px sans-serif`
+    const tw = ctx.measureText(chord).width
+    const px = width / 2
+    const py = 14 * dpr
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.85)'
+    ctx.fillRect(px - tw / 2 - 8 * dpr, py - 12 * dpr, tw + 16 * dpr, 20 * dpr)
+    ctx.fillStyle = '#22d3ee'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(chord, px, py)
+  }
+}
+
 async function startVisualization() {
   if (rafId !== null) return
 
@@ -609,9 +1144,8 @@ async function startVisualization() {
   const actualSampleRate = audioContext?.sampleRate ?? 44100
   console.log(`[VisualizerPanel] Using sample rate: ${actualSampleRate} Hz`)
 
-  // Limpiar espectrograma cuando inicia nueva reproducción
   const handlePlay = () => {
-    clearSpectrogram()
+    clearAll()
   }
   window.addEventListener('strudel-play', handlePlay)
   cleanupPlayListener = () => {
@@ -670,13 +1204,29 @@ async function startVisualization() {
     return (octave + 1) * 12 + base + offset
   }
 
-  // Variables para query de pattern
-  const LOOKBEHIND = 2  // Ciclos hacia atrás
-  const LOOKAHEAD = 2   // Ciclos hacia adelante
+  const LOOKAHEAD = 2
+
+  function updatePeaks(data: Float32Array, sampleRate: number, MIN_DB: number, MAX_DB: number, barCount: number) {
+    if (!peakValues || peakValues.length !== barCount) {
+      peakValues = new Float32Array(barCount)
+    }
+    const nyquist = sampleRate / 2
+    for (let i = 0; i < barCount; i++) {
+      const logFreq = 20 * Math.pow(nyquist / 20, i / barCount)
+      const binIndex = Math.floor((logFreq / nyquist) * data.length)
+      if (binIndex >= data.length) continue
+      const magnitude = (data[binIndex] - MIN_DB) / (MAX_DB - MIN_DB)
+      const clamped = Math.min(Math.max(magnitude, 0), 1)
+      if (clamped > peakValues[i]) {
+        peakValues[i] = clamped
+      } else {
+        peakValues[i] = Math.max(0, peakValues[i] - PEAK_DECAY / 60)
+      }
+    }
+  }
 
   function draw() {
     if (activeGroup.value === 'audio') {
-      // Grupo Audio: Waveform, Spectrum, Spectrogram
       const wCtx = waveformCanvas.value?.getContext('2d')
       const sCtx = spectrumCanvas.value?.getContext('2d')
       const sgCtx = spectrogramCanvas.value?.getContext('2d')
@@ -685,26 +1235,32 @@ async function startVisualization() {
       if (spectrumCanvas.value) resizeCanvas(spectrumCanvas.value)
       if (spectrogramCanvas.value) resizeCanvas(spectrogramCanvas.value)
 
-      // Verificar que existe el analyzer antes de obtener datos
-      if (hasAnalyser(ANALYZER_ID)) {
-        // IMPORTANTE: Strudel usa un buffer compartido para time y frequency data.
-        // Debemos copiar los datos de tiempo antes de obtener los de frecuencia,
-        // ya que el segundo sobrescribiría el primero.
+      if (hasAnalyser(ANALYZER_ID) && !frozen.value) {
         const timeDataRaw = getAnalyzerData('time', ANALYZER_ID)
         const timeData = timeDataRaw ? new Float32Array(timeDataRaw) : null
         const freqData = getAnalyzerData('frequency', ANALYZER_ID)
 
-        if (wCtx && timeData) drawWaveform(wCtx, timeData)
-        if (sCtx && freqData) drawSpectrum(sCtx, freqData, actualSampleRate)
-        if (sgCtx && freqData) drawSpectrogram(sgCtx, freqData, actualSampleRate)
-      } else {
-        // Dibujar fondos vacíos con mensaje
+        if (peakHold.value && freqData) {
+          updatePeaks(freqData, actualSampleRate, minDb.value, maxDb.value, numBars.value)
+        }
+
+        const wMx = hoverCanvas.value === 'waveform' ? hoverX.value : null
+        const wMy = hoverCanvas.value === 'waveform' ? hoverY.value : null
+        const sMx = hoverCanvas.value === 'spectrum' ? hoverX.value : null
+        const sMy = hoverCanvas.value === 'spectrum' ? hoverY.value : null
+        const sgMx = hoverCanvas.value === 'spectrogram' ? hoverX.value : null
+        const sgMy = hoverCanvas.value === 'spectrogram' ? hoverY.value : null
+
+        if (timeData) detectedPitch.value = detectPitch(timeData, actualSampleRate)
+        if (wCtx && timeData) drawWaveform(wCtx, timeData, waveZoom.value, wMx, wMy, detectedPitch.value)
+        if (sCtx && freqData) drawSpectrum(sCtx, freqData, actualSampleRate, minDb.value, maxDb.value, numBars.value, peakHold.value ? peakValues : null, spectrumLine.value, sMx, sMy)
+        if (sgCtx && freqData) drawSpectrogram(sgCtx, freqData, actualSampleRate, minDb.value, maxDb.value, spectrogramLog.value, sgMx, sgMy)
+      } else if (!hasAnalyser(ANALYZER_ID)) {
         if (wCtx) drawEmptyCanvas(wCtx, 'Esperando audio...')
         if (sCtx) drawEmptyCanvas(sCtx, 'Esperando audio...')
         if (sgCtx) drawEmptyCanvas(sgCtx, 'Esperando audio...')
       }
-    } else {
-      // Grupo Notas: Spiral, Pitchwheel, Piano Roll
+    } else if (activeGroup.value === 'notes' && !frozen.value) {
       const spCtx = spiralCanvas.value?.getContext('2d')
       const pwCtx = pitchwheelCanvas.value?.getContext('2d')
       const prCtx = pianorollCanvas.value?.getContext('2d')
@@ -713,16 +1269,30 @@ async function startVisualization() {
       if (pitchwheelCanvas.value) resizeCanvas(pitchwheelCanvas.value)
       if (pianorollCanvas.value) resizeCanvas(pianorollCanvas.value)
 
-      // Obtener tiempo actual del scheduler (en ciclos)
       const now = getSchedulerTime()
 
-      // Query al pattern activo para obtener haps
-      const haps = queryPattern(now - LOOKBEHIND, now + LOOKAHEAD)
-      events = hapsToEvents(haps)
+      // Spiral/pitchwheel: ventana fija amplia
+      const spPwHaps = queryPattern(now - 4, now + LOOKAHEAD)
+      const spPwEvents = hapsToEvents(spPwHaps)
 
-      if (spCtx) drawSpiral(spCtx, now)
-      if (pwCtx) drawPitchwheel(pwCtx, now)
-      if (prCtx) drawPianoRoll(prCtx, now)
+      // Piano roll: ventana configurable
+      const prHaps = queryPattern(now - pianoLookbehind.value, now + LOOKAHEAD)
+      events = hapsToEvents(prHaps)
+
+      if (spCtx) { const saved = events; events = spPwEvents; drawSpiral(spCtx, now); events = saved }
+      if (pwCtx) { const saved = events; events = spPwEvents; drawPitchwheel(pwCtx, now); events = saved }
+      const prMx = hoverCanvas.value === 'pianoroll' ? hoverX.value : null
+      const prMy = hoverCanvas.value === 'pianoroll' ? hoverY.value : null
+      if (prCtx) drawPianoRoll(prCtx, now, pianoLookbehind.value, prMx, prMy, punchcard.value)
+    } else if (activeGroup.value === 'keyboard' && !frozen.value) {
+      const kbCtx = keyboardCanvas.value?.getContext('2d')
+      if (keyboardCanvas.value) resizeCanvas(keyboardCanvas.value)
+
+      const now = getSchedulerTime()
+      const kbHaps = queryPattern(now - 1, now + 1)
+      const kbEvents = hapsToEvents(kbHaps)
+
+      if (kbCtx) drawKeyboard(kbCtx, now, keyboardStart.value, keyboardEnd.value, kbEvents, kbLabels.value, kbMidi.value)
     }
 
     rafId = requestAnimationFrame(draw)
@@ -755,11 +1325,52 @@ function stopVisualization() {
   events = []
 }
 
-function clearSpectrogram() {
-  const ctx = spectrogramCanvas.value?.getContext('2d')
-  if (ctx) {
-    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height)
+function clearAll() {
+  spectrogramClean = null
+  const canvases = [spectrogramCanvas, waveformCanvas, spectrumCanvas, spiralCanvas, pitchwheelCanvas, pianorollCanvas, keyboardCanvas]
+  for (const c of canvases) {
+    const ctx = c.value?.getContext('2d')
+    if (ctx) ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height)
   }
+  events = []
+}
+
+function exportScreenshot() {
+  const canvases: HTMLCanvasElement[] = []
+  if (activeGroup.value === 'audio') {
+    if (waveformCanvas.value) canvases.push(waveformCanvas.value)
+    if (spectrumCanvas.value) canvases.push(spectrumCanvas.value)
+    if (spectrogramCanvas.value) canvases.push(spectrogramCanvas.value)
+  } else if (activeGroup.value === 'notes') {
+    if (spiralCanvas.value) canvases.push(spiralCanvas.value)
+    if (pitchwheelCanvas.value) canvases.push(pitchwheelCanvas.value)
+    if (pianorollCanvas.value) canvases.push(pianorollCanvas.value)
+  } else {
+    if (keyboardCanvas.value) canvases.push(keyboardCanvas.value)
+  }
+  if (canvases.length === 0) return
+
+  const gap = 4
+  const totalWidth = canvases.reduce((s, c) => s + c.width, 0) + gap * (canvases.length - 1)
+  const maxHeight = Math.max(...canvases.map(c => c.height))
+
+  const out = document.createElement('canvas')
+  out.width = totalWidth
+  out.height = maxHeight
+  const ctx = out.getContext('2d')!
+  ctx.fillStyle = '#0f172a'
+  ctx.fillRect(0, 0, totalWidth, maxHeight)
+
+  let x = 0
+  for (const c of canvases) {
+    ctx.drawImage(c, x, 0)
+    x += c.width + gap
+  }
+
+  const link = document.createElement('a')
+  link.download = `strudel-${activeGroup.value}-${Date.now()}.png`
+  link.href = out.toDataURL('image/png')
+  link.click()
 }
 
 function toggleExpand() {
@@ -774,42 +1385,201 @@ watch(() => props.visible, (visible) => {
   }
 })
 
+watch(peakHold, (on) => {
+  if (!on) peakValues = null
+})
+
+watch(fftSize, async (size) => {
+  try {
+    const { setAnalyzerFftSize, ANALYZER_ID } = await import('./audio/engine')
+    setAnalyzerFftSize(ANALYZER_ID, size)
+  } catch {}
+})
+
+onMounted(() => {
+  document.addEventListener('click', closeOpenHelp)
+})
+
 onUnmounted(() => {
   stopVisualization()
+  document.removeEventListener('click', closeOpenHelp)
 })
 </script>
 
 <template>
   <div class="visualizer-panel" :class="{ hidden: !visible, collapsed: !isExpanded }">
     <div class="viz-header">
-      <div class="viz-tabs">
-        <button
-          class="viz-tab"
-          :class="{ active: activeGroup === 'audio' }"
-          @click="activeGroup = 'audio'"
-        >
-          Audio
-        </button>
-        <button
-          class="viz-tab"
-          :class="{ active: activeGroup === 'notes' }"
-          @click="activeGroup = 'notes'"
-        >
-          Notas
-        </button>
+      <div class="viz-bar">
+        <div class="viz-tabs">
+          <button class="viz-tab" :class="{ active: activeGroup === 'audio' }" @click="activeGroup = 'audio'">Audio</button>
+          <button class="viz-tab" :class="{ active: activeGroup === 'notes' }" @click="activeGroup = 'notes'">Notas</button>
+          <button class="viz-tab" :class="{ active: activeGroup === 'keyboard' }" @click="activeGroup = 'keyboard'">Teclado</button>
+        </div>
+        <div class="viz-actions">
+          <button class="viz-btn" :class="{ 'viz-btn-active': frozen }" @click="frozen = !frozen" title="Congelar visualizaciones">
+            {{ frozen ? '&#9654; Reanudar' : '&#10074;&#10074; Congelar' }}
+          </button>
+          <button class="viz-btn" @click="clearAll" title="Limpiar visualizaciones">Limpiar</button>
+          <button class="viz-btn" @click="exportScreenshot" title="Guardar captura PNG">&#128247;</button>
+          <button v-if="isExpanded" class="viz-btn" :class="{ 'viz-btn-active': showSettings }" @click="showSettings = !showSettings" title="Ajustes">&#9881;</button>
+          <button class="viz-btn" @click="toggleExpand">{{ isExpanded ? '&#9660;' : '&#9650;' }}</button>
+        </div>
       </div>
-      <div class="viz-controls">
-        <button
-          v-if="activeGroup === 'audio'"
-          class="viz-btn"
-          @click="clearSpectrogram"
-          title="Limpiar espectrograma"
-        >
-          Limpiar
-        </button>
-        <button class="viz-btn" @click="toggleExpand">
-          {{ isExpanded ? 'Colapsar' : 'Expandir' }}
-        </button>
+      <div class="viz-settings" v-show="isExpanded && showSettings">
+        <template v-if="activeGroup === 'audio'">
+          <div class="settings-group">
+            <span class="settings-group-title">Onda</span>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Zoom</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.zoom.title }}</span><span class="tt-desc">{{ paramHelp.zoom.desc }}</span></div>
+              </details>
+              <input type="range" :min="5" :max="100" v-model.number="waveZoom" />
+              <span class="param-value">{{ waveZoom }}%</span>
+            </div>
+          </div>
+          <div class="settings-divider"></div>
+          <div class="settings-group">
+            <span class="settings-group-title">Espectro</span>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">dB</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.db.title }}</span><span class="tt-desc">{{ paramHelp.db.desc }}</span></div>
+              </details>
+              <input type="range" :min="-120" :max="-20" v-model.number="minDb" />
+              <span class="param-value">{{ minDb }}</span>
+            </div>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Barras</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.barras.title }}</span><span class="tt-desc">{{ paramHelp.barras.desc }}</span></div>
+              </details>
+              <input type="range" :min="16" :max="512" :step="16" v-model.number="numBars" />
+              <span class="param-value">{{ numBars }}</span>
+            </div>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Peak</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.peak.title }}</span><span class="tt-desc">{{ paramHelp.peak.desc }}</span></div>
+              </details>
+              <input type="checkbox" v-model="peakHold" />
+            </div>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Linea</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.linea.title }}</span><span class="tt-desc">{{ paramHelp.linea.desc }}</span></div>
+              </details>
+              <input type="checkbox" v-model="spectrumLine" />
+            </div>
+          </div>
+          <div class="settings-divider"></div>
+          <div class="settings-group">
+            <span class="settings-group-title">Espectrograma</span>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">FFT</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.fft.title }}</span><span class="tt-desc">{{ paramHelp.fft.desc }}</span></div>
+              </details>
+              <select v-model.number="fftSize">
+                <option :value="256">256</option>
+                <option :value="512">512</option>
+                <option :value="1024">1024</option>
+                <option :value="2048">2048</option>
+                <option :value="4096">4096</option>
+                <option :value="8192">8192</option>
+              </select>
+            </div>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Log</summary>
+                <div class="param-tooltip param-tooltip-right"><span class="tt-title">{{ paramHelp.log.title }}</span><span class="tt-desc">{{ paramHelp.log.desc }}</span></div>
+              </details>
+              <input type="checkbox" v-model="spectrogramLog" />
+            </div>
+          </div>
+        </template>
+        <template v-else-if="activeGroup === 'notes'">
+          <div class="settings-group">
+            <span class="settings-group-title">Piano Roll</span>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Ventana</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.ventana.title }}</span><span class="tt-desc">{{ paramHelp.ventana.desc }}</span></div>
+              </details>
+              <input type="range" :min="1" :max="8" :step="0.5" v-model.number="pianoLookbehind" />
+              <span class="param-value">{{ pianoLookbehind }}c</span>
+            </div>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Punchcard</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.punchcard.title }}</span><span class="tt-desc">{{ paramHelp.punchcard.desc }}</span></div>
+              </details>
+              <input type="checkbox" v-model="punchcard" />
+            </div>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Solfeo</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.solfeo.title }}</span><span class="tt-desc">{{ paramHelp.solfeo.desc }}</span></div>
+              </details>
+              <input type="checkbox" v-model="solfeo" />
+            </div>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Espiral</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.spiral.title }}</span><span class="tt-desc">{{ paramHelp.spiral.desc }}</span></div>
+              </details>
+              <input type="checkbox" v-model="showSpiral" />
+            </div>
+          </div>
+        </template>
+        <template v-if="activeGroup === 'keyboard'">
+          <div class="settings-group">
+            <span class="settings-group-title">Teclado</span>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Octava</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.kbOctava.title }}</span><span class="tt-desc">{{ paramHelp.kbOctava.desc }}</span></div>
+              </details>
+              <select v-model.number="keyboardStart">
+                <option :value="24">C1</option>
+                <option :value="36">C2</option>
+                <option :value="48">C3</option>
+                <option :value="60">C4</option>
+                <option :value="72">C5</option>
+              </select>
+            </div>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Octavas</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.kbOctavas.title }}</span><span class="tt-desc">{{ paramHelp.kbOctavas.desc }}</span></div>
+              </details>
+              <select v-model.number="keyboardEnd" @change="() => { if (keyboardEnd <= keyboardStart) keyboardEnd = keyboardStart + 12 }">
+                <option v-for="n in 6" :key="n" :value="keyboardStart + n * 12">{{ n }}</option>
+              </select>
+            </div>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Solfeo</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.solfeo.title }}</span><span class="tt-desc">{{ paramHelp.solfeo.desc }}</span></div>
+              </details>
+              <input type="checkbox" v-model="solfeo" />
+            </div>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Etiquetas</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.kbLabels.title }}</span><span class="tt-desc">{{ paramHelp.kbLabels.desc }}</span></div>
+              </details>
+              <input type="checkbox" v-model="kbLabels" />
+            </div>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">MIDI</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.kbMidi.title }}</span><span class="tt-desc">{{ paramHelp.kbMidi.desc }}</span></div>
+              </details>
+              <input type="checkbox" v-model="kbMidi" />
+            </div>
+          </div>
+        </template>
       </div>
     </div>
     <div class="viz-content" v-show="isExpanded">
@@ -817,20 +1587,20 @@ onUnmounted(() => {
       <template v-if="activeGroup === 'audio'">
         <div class="viz-container">
           <span class="viz-label">Waveform</span>
-          <canvas ref="waveformCanvas"></canvas>
+          <canvas ref="waveformCanvas" @mousemove="(e) => handleCanvasMove('waveform', e)" @mouseleave="handleCanvasLeave"></canvas>
         </div>
         <div class="viz-container">
           <span class="viz-label">Spectrum</span>
-          <canvas ref="spectrumCanvas"></canvas>
+          <canvas ref="spectrumCanvas" @mousemove="(e) => handleCanvasMove('spectrum', e)" @mouseleave="handleCanvasLeave"></canvas>
         </div>
         <div class="viz-container">
           <span class="viz-label">Spectrogram</span>
-          <canvas ref="spectrogramCanvas"></canvas>
+          <canvas ref="spectrogramCanvas" @mousemove="(e) => handleCanvasMove('spectrogram', e)" @mouseleave="handleCanvasLeave"></canvas>
         </div>
       </template>
       <!-- Grupo Notas -->
-      <template v-else>
-        <div class="viz-container">
+      <template v-else-if="activeGroup === 'notes'">
+        <div v-if="showSpiral" class="viz-container">
           <span class="viz-label">Spiral</span>
           <canvas ref="spiralCanvas"></canvas>
         </div>
@@ -838,11 +1608,15 @@ onUnmounted(() => {
           <span class="viz-label">Pitchwheel</span>
           <canvas ref="pitchwheelCanvas"></canvas>
         </div>
-        <div class="viz-container" style="flex: 1.5">
+        <div class="viz-container" :style="{ flex: showSpiral ? 1.5 : 3 }">
           <span class="viz-label">Piano Roll</span>
-          <canvas ref="pianorollCanvas"></canvas>
+          <canvas ref="pianorollCanvas" @mousemove="(e) => handleCanvasMove('pianoroll', e)" @mouseleave="handleCanvasLeave"></canvas>
         </div>
       </template>
+      <!-- Grupo Teclado -->
+      <div v-show="activeGroup === 'keyboard'" class="viz-container" style="flex: 1">
+        <canvas ref="keyboardCanvas"></canvas>
+      </div>
     </div>
   </div>
 </template>
@@ -857,7 +1631,6 @@ onUnmounted(() => {
   border-top: 2px solid #1e293b;
   z-index: 100;
   box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.3);
-  transition: height 0.3s ease;
 }
 
 .visualizer-panel.hidden {
@@ -868,13 +1641,17 @@ onUnmounted(() => {
   height: auto !important;
 }
 
+/* Header: two-row layout */
 .viz-header {
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+}
+
+.viz-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 16px;
-  background: #1e293b;
-  border-bottom: 1px solid #334155;
+  padding: 4px 12px;
 }
 
 .viz-tabs {
@@ -883,7 +1660,7 @@ onUnmounted(() => {
 }
 
 .viz-tab {
-  padding: 6px 16px;
+  padding: 5px 14px;
   background: transparent;
   border: none;
   border-radius: 4px;
@@ -904,13 +1681,13 @@ onUnmounted(() => {
   color: #ffffff;
 }
 
-.viz-controls {
+.viz-actions {
   display: flex;
-  gap: 8px;
+  gap: 6px;
 }
 
 .viz-btn {
-  padding: 4px 12px;
+  padding: 4px 10px;
   background: #334155;
   border: none;
   border-radius: 4px;
@@ -925,6 +1702,147 @@ onUnmounted(() => {
   color: #e2e8f0;
 }
 
+.viz-btn-active {
+  background: #3b82f6 !important;
+  color: #ffffff !important;
+}
+
+/* Settings drawer */
+.viz-settings {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 6px 12px;
+  border-top: 1px solid #334155;
+  background: #1a2536;
+}
+
+.settings-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px;
+}
+
+.settings-group-title {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.settings-divider {
+  width: 1px;
+  align-self: stretch;
+  background: #334155;
+  margin: 0 4px;
+  min-height: 20px;
+}
+
+/* Parameter controls */
+.viz-param {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+.viz-param input[type="range"] {
+  width: 70px;
+  height: 3px;
+  accent-color: #3b82f6;
+  cursor: pointer;
+}
+
+.viz-param input[type="checkbox"] {
+  accent-color: #3b82f6;
+  cursor: pointer;
+}
+
+.viz-param select {
+  background: #334155;
+  color: #e2e8f0;
+  border: none;
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.param-value {
+  font-size: 10px;
+  color: #64748b;
+  min-width: 28px;
+  text-align: right;
+  font-family: monospace;
+}
+
+/* Tooltip system */
+.param-help {
+  position: relative;
+  display: inline;
+}
+
+.param-label {
+  cursor: help;
+  border-bottom: 1px dotted #64748b;
+  list-style: none;
+  font-size: 11px;
+  color: #94a3b8;
+  user-select: none;
+}
+
+.param-label::-webkit-details-marker {
+  display: none;
+}
+
+.param-label::marker {
+  content: '';
+}
+
+.param-tooltip {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0;
+  width: 260px;
+  padding: 10px 12px;
+  background: #334155;
+  border: 1px solid #475569;
+  border-radius: 8px;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.5);
+  z-index: 200;
+  box-sizing: border-box;
+}
+
+.param-tooltip-right {
+  left: auto;
+  right: 0;
+}
+
+.param-tooltip .tt-title {
+  display: block;
+  margin: 0 0 4px 0;
+  padding: 0;
+  color: #22d3ee;
+  font-size: 13px;
+  font-weight: bold;
+  line-height: 1.4;
+}
+
+.param-tooltip .tt-desc {
+  display: block;
+  margin: 0;
+  padding: 0;
+  color: #cbd5e1;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Canvas area */
 .viz-content {
   display: flex;
   gap: 8px;
@@ -957,6 +1875,15 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px) {
+  .viz-settings {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .settings-divider {
+    display: none;
+  }
+
   .viz-content {
     flex-wrap: wrap;
     height: auto;

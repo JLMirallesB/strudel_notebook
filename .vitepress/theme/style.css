@@ -72,8 +72,65 @@ h1, h2, h3, h4, .vp-doc h1, .vp-doc h2, .vp-doc h3 {
   color: white;
 }
 
-.strudel-box-header .active-indicator {
+.strudel-box-header .reload-btn {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+}
+
+.strudel-box-header .focus-btn {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
   margin-left: auto;
+}
+
+/* Focus mode */
+.strudel-box.is-focused {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 260px;
+  margin: 0;
+  border-radius: 0;
+  border: none;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.strudel-box.is-focused .strudel-box-header {
+  flex-shrink: 0;
+}
+
+.strudel-box.is-focused .editor-container {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.strudel-box.is-focused .code-textarea {
+  height: 100%;
+  min-height: 0;
+}
+
+.strudel-box.is-focused .highlight-layer {
+  height: 100%;
+}
+
+.strudel-box.is-focused .widget-panel {
+  flex-shrink: 0;
+}
+
+.strudel-box.is-focused .loading-bar {
+  flex-shrink: 0;
+}
+
+.strudel-box.is-focused .error-message {
+  flex-shrink: 0;
+}
+
+.strudel-box-header .active-indicator {
   padding: 4px 10px;
   background: rgba(255, 255, 255, 0.3);
   border-radius: 999px;
