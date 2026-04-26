@@ -27,8 +27,45 @@ h1, h2, h3, h4, .vp-doc h1, .vp-doc h2, .vp-doc h3 {
   padding-bottom: 280px !important;
 }
 
+/* Home hero full width centrado */
+.VPHero .container {
+  max-width: 100% !important;
+  text-align: center !important;
+}
+
+.VPHero .main {
+  text-align: center !important;
+  max-width: 100% !important;
+  width: 100% !important;
+}
+
+.VPHero .heading {
+  align-items: center !important;
+}
+
+.VPHero .name,
+.VPHero .text,
+.VPHero .tagline {
+  max-width: 100% !important;
+  width: 100% !important;
+  text-align: center !important;
+}
+
+.VPHero .name {
+  font-family: 'Space Grotesk', sans-serif !important;
+}
+
+.VPHero .actions {
+  justify-content: center !important;
+}
+
+.VPHome {
+  padding-bottom: 280px !important;
+}
+
 /* StrudelBox */
 .strudel-box {
+  position: relative;
   margin: 1.5rem 0;
   border: 1px solid var(--vp-c-divider);
   border-radius: 12px;
@@ -77,7 +114,7 @@ h1, h2, h3, h4, .vp-doc h1, .vp-doc h2, .vp-doc h3 {
 .strudel-box-header .rec-toggle-btn {
   background: rgba(255, 255, 255, 0.2);
   color: white;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .strudel-box-header .rec-toggle-btn.is-armed {
@@ -96,6 +133,101 @@ h1, h2, h3, h4, .vp-doc h1, .vp-doc h2, .vp-doc h3 {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
 }
+
+/* Snippets */
+.snippet-menu-wrap {
+  position: relative;
+}
+
+.strudel-box-header .menu-btn {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+  font-size: 14px;
+}
+
+.editor-menu-wrap,
+.process-menu-wrap {
+  position: relative;
+}
+
+.snippet-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: #1e293b;
+  border: 1px solid #475569;
+  border-radius: 8px;
+  padding: 8px;
+  z-index: 50;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  width: 260px;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.snippet-cat-name {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #64748b;
+  padding: 4px 8px 2px;
+}
+
+.snippet-item {
+  display: block;
+  width: 100%;
+  background: transparent;
+  color: #e2e8f0;
+  border: none;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  font-family: 'Space Grotesk', sans-serif;
+  transition: background 0.15s;
+}
+
+.snippet-item:hover {
+  background: #334155;
+}
+
+/* Interchange popup (teleported to body) */
+.interchange-popup {
+  position: fixed;
+  background: #1e293b;
+  border: 2px solid #f59e0b;
+  border-radius: 6px;
+  padding: 6px;
+  z-index: 9999;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.7);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  max-width: 280px;
+}
+
+.interchange-popup button {
+  background: transparent;
+  color: #fbbf24;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-family: 'IBM Plex Mono', monospace;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.interchange-popup button:hover {
+  background: #334155;
+  border-color: #f59e0b;
+}
+
 
 .strudel-box-header .focus-btn {
   background: rgba(255, 255, 255, 0.2);

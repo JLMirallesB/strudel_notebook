@@ -6,7 +6,7 @@ const props = defineProps<{
 }>()
 
 const isExpanded = ref(true)
-const activeGroup = ref<'audio' | 'notes' | 'keyboard' | 'score'>('audio')
+const activeGroup = ref<'audio' | 'notes' | 'keyboard' | 'score' | 'drums'>('audio')
 
 // Canvas refs - Grupo Audio
 const waveformCanvas = ref<HTMLCanvasElement | null>(null)
@@ -23,6 +23,9 @@ const keyboardCanvas = ref<HTMLCanvasElement | null>(null)
 
 // Canvas refs - Grupo Partitura
 const scoreCanvas = ref<HTMLCanvasElement | null>(null)
+
+// Canvas refs - Grupo Batería
+const drumsCanvas = ref<HTMLCanvasElement | null>(null)
 
 let rafId: number | null = null
 let cleanupPlayListener: (() => void) | null = null
@@ -44,6 +47,8 @@ const showSpiral = ref(true)
 const kbLabels = ref(true)
 const kbMidi = ref(false)
 const scoreCycles = ref(4)
+const drumCycles = ref(1)
+const drumShowPads = ref(true)
 const keyboardStart = ref(36)
 const keyboardEnd = ref(84)
 const showSettings = ref(false)
@@ -118,6 +123,14 @@ const paramHelp: Record<string, { title: string; desc: string }> = {
   kbMidi: {
     title: 'Numeros MIDI',
     desc: 'Muestra el numero MIDI (0-127) en vez del nombre de la nota. Util para entender la numeracion MIDI.'
+  },
+  drumCycles: {
+    title: 'Ciclos',
+    desc: 'Numero de ciclos a mostrar en la rejilla de bateria. Con 1 ciclo se ven los steps individuales con mas detalle.'
+  },
+  drumPads: {
+    title: 'Mostrar pads',
+    desc: 'Muestra pads de bateria junto a la rejilla. Los pads se iluminan cuando suena cada instrumento.'
   },
   scoreCycles: {
     title: 'Compases',
@@ -1135,7 +1148,14 @@ function drawKeyboard(ctx: CanvasRenderingContext2D, now: number, startMidi: num
   }
 }
 
-function drawScore(ctx: CanvasRenderingContext2D, scoreEvents: NoteEvent[], now: number, numCycles: number, mx: number | null, my: number | null) {
+// Percussion staff positions (line index from top, 0 = above staff, 4 = bottom line)
+const PERC_POSITION: Record<string, number> = {
+  cr: -0.5, cy: -0.5, oh: 0, hh: 0, ch: 0,
+  rim: 1, cb: 1.5, tom: 2, cp: 2.5, sd: 3, bd: 4.5
+}
+const PERC_X_HEAD = new Set(['hh', 'ch', 'oh', 'cr', 'cy', 'rim'])
+
+function drawScore(ctx: CanvasRenderingContext2D, scoreEvents: NoteEvent[], now: number, numCycles: number, mx: number | null, my: number | null, drumEvts: DrumEvent[]) {
   const { width, height } = ctx.canvas
   ctx.clearRect(0, 0, width, height)
 
@@ -1148,17 +1168,26 @@ function drawScore(ctx: CanvasRenderingContext2D, scoreEvents: NoteEvent[], now:
   const marginTop = 20 * dpr
   const scoreWidth = width - marginLeft - marginRight
 
-  const lineSpacing = Math.min((height - marginTop * 2) / 12, 8 * dpr)
+  const hasMelody = scoreEvents.some(e => e.midi !== undefined)
+  const hasDrums = drumEvts.length > 0
+  const totalStaves = (hasMelody ? 1 : 0) + (hasDrums ? 1 : 0) || 1
+
+  const lineSpacing = Math.min((height - marginTop * 2) / (totalStaves * 7 + 2), 8 * dpr)
   const noteRadius = lineSpacing * 0.45
 
   const midiValues = scoreEvents.filter(e => e.midi !== undefined).map(e => Math.round(e.midi!))
   const minMidi = midiValues.length > 0 ? Math.min(...midiValues) : 60
   const maxMidi = midiValues.length > 0 ? Math.max(...midiValues) : 72
-  const useBassClef = minMidi < 55
-  const useTrebleClef = maxMidi >= 55
+  const useBassClef = hasMelody && minMidi < 55
+  const useTrebleClef = hasMelody && maxMidi >= 55
 
-  let trebleY = 0, bassY = 0
-  if (useBassClef && useTrebleClef) {
+  let trebleY = 0, bassY = 0, percY = 0
+  if (hasMelody && hasDrums) {
+    trebleY = marginTop
+    percY = marginTop + lineSpacing * 7
+  } else if (hasDrums) {
+    percY = marginTop + (height - marginTop * 2) / 2 - lineSpacing * 2
+  } else if (useBassClef && useTrebleClef) {
     trebleY = marginTop + lineSpacing * 2
     bassY = marginTop + lineSpacing * 9
   } else if (useBassClef) {
@@ -1167,7 +1196,7 @@ function drawScore(ctx: CanvasRenderingContext2D, scoreEvents: NoteEvent[], now:
     trebleY = marginTop + (height - marginTop * 2) / 2 - lineSpacing * 2
   }
 
-  const staffMidY = useTrebleClef ? trebleY + lineSpacing * 2 : bassY + lineSpacing * 2
+  const staffMidY = useTrebleClef ? trebleY + lineSpacing * 2 : (hasDrums && !hasMelody) ? percY + lineSpacing * 2 : bassY + lineSpacing * 2
 
   // Staff lines
   ctx.strokeStyle = '#94a3b8'
@@ -1190,12 +1219,24 @@ function drawScore(ctx: CanvasRenderingContext2D, scoreEvents: NoteEvent[], now:
   if (useTrebleClef) { ctx.font = `bold ${lineSpacing * 4}px serif`; ctx.fillText('𝄞', marginLeft - 20 * dpr, trebleY + lineSpacing * 2) }
   if (useBassClef) { ctx.font = `bold ${lineSpacing * 3}px serif`; ctx.fillText('𝄢', marginLeft - 20 * dpr, bassY + lineSpacing * 2) }
 
+  // Percussion staff
+  if (hasDrums) {
+    drawStaff(percY)
+    // Percussion clef: two vertical bars
+    ctx.strokeStyle = '#1e293b'
+    ctx.lineWidth = 3 * dpr
+    const clefX = marginLeft - 22 * dpr
+    ctx.beginPath(); ctx.moveTo(clefX, percY + lineSpacing); ctx.lineTo(clefX, percY + lineSpacing * 3); ctx.stroke()
+    ctx.beginPath(); ctx.moveTo(clefX + 6 * dpr, percY + lineSpacing); ctx.lineTo(clefX + 6 * dpr, percY + lineSpacing * 3); ctx.stroke()
+    ctx.lineWidth = 1
+  }
+
   // Bar lines
   const measureWidth = scoreWidth / numCycles
   ctx.strokeStyle = '#64748b'
   ctx.lineWidth = 1
-  const barTop = useTrebleClef ? trebleY : bassY
-  const barBottom = useBassClef ? bassY + lineSpacing * 4 : trebleY + lineSpacing * 4
+  const barTop = useTrebleClef ? trebleY : (hasDrums ? percY : bassY)
+  const barBottom = hasDrums ? percY + lineSpacing * 4 : (useBassClef ? bassY + lineSpacing * 4 : trebleY + lineSpacing * 4)
   for (let m = 0; m <= numCycles; m++) {
     const x = marginLeft + m * measureWidth
     ctx.beginPath(); ctx.moveTo(x, barTop); ctx.lineTo(x, barBottom); ctx.stroke()
@@ -1398,6 +1439,72 @@ function drawScore(ctx: CanvasRenderingContext2D, scoreEvents: NoteEvent[], now:
     }
   }
 
+  // Percussion notes
+  if (hasDrums) {
+    const PERC_LABELS: Record<string, string> = {
+      bd: 'B', sd: 'S', hh: 'H', oh: 'O', ch: 'H',
+      cp: 'Cl', tom: 'T', rim: 'R', cb: 'Cb', cy: 'Cy', cr: 'Cr'
+    }
+
+    for (const de of drumEvts) {
+      if (de.time < 0 || de.time >= numCycles) continue
+
+      const pos = PERC_POSITION[de.sound] ?? 2
+      const y = percY + pos * lineSpacing
+      const x = marginLeft + (de.time / numCycles) * scoreWidth
+      const isActive = de.time <= now && de.time + de.dur > now
+      const color = isActive ? '#3b82f6' : '#1e293b'
+      const useX = PERC_X_HEAD.has(de.sound)
+
+      // Ledger line if needed
+      if (pos < 0 || pos > 4) {
+        ctx.strokeStyle = '#94a3b8'
+        ctx.lineWidth = 1
+        const ly = pos < 0 ? percY - lineSpacing : percY + lineSpacing * 5
+        ctx.beginPath(); ctx.moveTo(x - noteRadius * 1.5, ly); ctx.lineTo(x + noteRadius * 1.5, ly); ctx.stroke()
+      }
+
+      if (useX) {
+        // X notehead
+        ctx.strokeStyle = color
+        ctx.lineWidth = 2
+        const s = noteRadius * 0.7
+        ctx.beginPath(); ctx.moveTo(x - s, y - s); ctx.lineTo(x + s, y + s); ctx.stroke()
+        ctx.beginPath(); ctx.moveTo(x + s, y - s); ctx.lineTo(x - s, y + s); ctx.stroke()
+      } else {
+        // Regular filled notehead
+        ctx.fillStyle = color
+        ctx.beginPath()
+        ctx.ellipse(x, y, noteRadius, noteRadius * 0.7, -0.3, 0, Math.PI * 2)
+        ctx.fill()
+      }
+
+      // Stem
+      const stemUp = pos <= 2
+      const stemLen = lineSpacing * 3
+      ctx.strokeStyle = color
+      ctx.lineWidth = 1.5
+      ctx.beginPath()
+      if (stemUp) {
+        ctx.moveTo(x + noteRadius * 0.8, y)
+        ctx.lineTo(x + noteRadius * 0.8, y - stemLen)
+      } else {
+        ctx.moveTo(x - noteRadius * 0.8, y)
+        ctx.lineTo(x - noteRadius * 0.8, y + stemLen)
+      }
+      ctx.stroke()
+
+      // Small label next to note
+      if (isActive) {
+        ctx.fillStyle = '#3b82f6'
+        ctx.font = `${8 * dpr}px sans-serif`
+        ctx.textAlign = 'left'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(PERC_LABELS[de.sound] || de.sound, x + noteRadius * 1.5, y)
+      }
+    }
+  }
+
   // Rests: find gaps in each beat subdivision
   const restSymbols: Record<string, string> = { whole: '𝄻', half: '𝄼', quarter: '𝄽', eighth: '𝄾', sixteenth: '𝄿' }
   const restStaffY = useTrebleClef ? trebleY + lineSpacing * 1.5 : bassY + lineSpacing * 1.5
@@ -1454,6 +1561,169 @@ function drawScore(ctx: CanvasRenderingContext2D, scoreEvents: NoteEvent[], now:
       ctx.fillStyle = '#e2e8f0'
       ctx.textAlign = 'left'; ctx.textBaseline = 'middle'
       ctx.fillText(label, lx, ly + 5 * dpr)
+    }
+  }
+}
+
+const DRUM_NAMES = ['bd', 'sd', 'hh', 'oh', 'ch', 'cp', 'tom', 'rim', 'cb', 'cy', 'cr']
+const DRUM_LABELS: Record<string, string> = {
+  bd: 'Kick', sd: 'Snare', hh: 'HiHat', oh: 'Open HH',
+  ch: 'Closed HH', cp: 'Clap', tom: 'Tom', rim: 'Rim',
+  cb: 'Cowbell', cy: 'Cymbal', cr: 'Crash'
+}
+const DRUM_COLORS: Record<string, string> = {
+  bd: '#ef4444', sd: '#f59e0b', hh: '#22d3ee', oh: '#06b6d4',
+  ch: '#67e8f9', cp: '#a78bfa', tom: '#fb923c', rim: '#fbbf24',
+  cb: '#4ade80', cy: '#818cf8', cr: '#c084fc'
+}
+
+type DrumEvent = { time: number; dur: number; sound: string }
+
+function hapsToDrumEvents(haps: any[]): DrumEvent[] {
+  const result: DrumEvent[] = []
+  for (const hap of haps) {
+    if (!hap.value) continue
+    const s = hap.value.s
+    if (!s || hap.value.note !== undefined) continue
+    const time = hap.whole?.begin?.valueOf() ?? 0
+    const end = hap.whole?.end?.valueOf() ?? time
+    result.push({ time, dur: end - time, sound: s })
+  }
+  return result
+}
+
+function drawDrums(ctx: CanvasRenderingContext2D, drumEvents: DrumEvent[], now: number, numCycles: number, showPads: boolean) {
+  const { width, height } = ctx.canvas
+  ctx.clearRect(0, 0, width, height)
+
+  const dpr = window.devicePixelRatio || 1
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.95)'
+  ctx.fillRect(0, 0, width, height)
+
+  // Show all drums, highlight the ones in use
+  const usedSet = new Set(drumEvents.map(e => e.sound))
+  const usedDrums = [...DRUM_NAMES]
+
+  const padWidth = showPads ? Math.min(height * 0.9, width * 0.2) : 0
+  const gridLeft = 50 * dpr
+  const gridRight = width - padWidth - 10 * dpr
+  const gridWidth = gridRight - gridLeft
+  const rowHeight = Math.min(height / (usedDrums.length + 0.5), 30 * dpr)
+  const gridTop = (height - rowHeight * usedDrums.length) / 2
+
+  // Active drums (sounding now)
+  const activeDrums = new Set<string>()
+  for (const e of drumEvents) {
+    if (e.time <= now && e.time + e.dur > now) {
+      activeDrums.add(e.sound)
+    }
+  }
+
+  // Draw grid rows
+  ctx.font = `${10 * dpr}px sans-serif`
+  ctx.textBaseline = 'middle'
+
+  for (let r = 0; r < usedDrums.length; r++) {
+    const drum = usedDrums[r]
+    const y = gridTop + r * rowHeight
+    const color = DRUM_COLORS[drum] || '#94a3b8'
+    const active = activeDrums.has(drum)
+    const inUse = usedSet.has(drum)
+
+    // Row background
+    ctx.fillStyle = active ? `${color}15` : r % 2 === 0 ? 'rgba(30, 41, 59, 0.5)' : 'rgba(30, 41, 59, 0.3)'
+    ctx.fillRect(gridLeft, y, gridWidth, rowHeight - 1)
+
+    // Label
+    ctx.fillStyle = active ? color : inUse ? '#94a3b8' : '#475569'
+    ctx.textAlign = 'right'
+    ctx.font = `${active ? 'bold ' : ''}${10 * dpr}px sans-serif`
+    ctx.fillText(DRUM_LABELS[drum] || drum, gridLeft - 6 * dpr, y + rowHeight / 2)
+
+    // Draw hits for this drum
+    for (const e of drumEvents) {
+      if (e.sound !== drum) continue
+      if (e.time < 0 || e.time >= numCycles) continue
+
+      const x = gridLeft + (e.time / numCycles) * gridWidth
+      const w = Math.max((e.dur / numCycles) * gridWidth, 4 * dpr)
+      const isActive = e.time <= now && e.time + e.dur > now
+
+      ctx.fillStyle = isActive ? color : `${color}99`
+      ctx.fillRect(x, y + 2, w, rowHeight - 5)
+
+      if (isActive) {
+        ctx.shadowColor = color
+        ctx.shadowBlur = 8 * dpr
+        ctx.fillRect(x, y + 2, w, rowHeight - 5)
+        ctx.shadowBlur = 0
+      }
+    }
+  }
+
+  // Grid lines (beats)
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)'
+  ctx.lineWidth = 1
+  const stepsPerCycle = 4
+  for (let m = 0; m < numCycles; m++) {
+    for (let b = 0; b <= stepsPerCycle; b++) {
+      const x = gridLeft + ((m + b / stepsPerCycle) / numCycles) * gridWidth
+      ctx.strokeStyle = b === 0 ? 'rgba(148, 163, 184, 0.5)' : 'rgba(148, 163, 184, 0.15)'
+      ctx.beginPath()
+      ctx.moveTo(x, gridTop)
+      ctx.lineTo(x, gridTop + usedDrums.length * rowHeight)
+      ctx.stroke()
+    }
+  }
+
+  // Playhead
+  if (now >= 0 && now < numCycles) {
+    const px = gridLeft + (now / numCycles) * gridWidth
+    ctx.strokeStyle = '#ffffff'
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.moveTo(px, gridTop - 4 * dpr)
+    ctx.lineTo(px, gridTop + usedDrums.length * rowHeight + 4 * dpr)
+    ctx.stroke()
+  }
+
+  // Drum pads
+  if (showPads && padWidth > 0) {
+    const padArea = width - padWidth
+    const cols = Math.ceil(Math.sqrt(usedDrums.length))
+    const rows = Math.ceil(usedDrums.length / cols)
+    const padSize = Math.min((padWidth - 10 * dpr) / cols, (height - 10 * dpr) / rows) - 4 * dpr
+    const padStartX = padArea + (padWidth - cols * (padSize + 4 * dpr)) / 2
+    const padStartY = (height - rows * (padSize + 4 * dpr)) / 2
+
+    for (let i = 0; i < usedDrums.length; i++) {
+      const drum = usedDrums[i]
+      const col = i % cols
+      const row = Math.floor(i / cols)
+      const px = padStartX + col * (padSize + 4 * dpr)
+      const py = padStartY + row * (padSize + 4 * dpr)
+      const color = DRUM_COLORS[drum] || '#94a3b8'
+      const active = activeDrums.has(drum)
+
+      // Pad background
+      if (active) {
+        ctx.shadowColor = color
+        ctx.shadowBlur = 12 * dpr
+      }
+      ctx.fillStyle = active ? color : '#1e293b'
+      ctx.fillRect(px, py, padSize, padSize)
+      ctx.shadowBlur = 0
+
+      ctx.strokeStyle = active ? color : '#475569'
+      ctx.lineWidth = active ? 2 : 1
+      ctx.strokeRect(px, py, padSize, padSize)
+
+      // Label
+      ctx.fillStyle = active ? '#000' : '#94a3b8'
+      ctx.font = `bold ${Math.min(10 * dpr, padSize * 0.25)}px sans-serif`
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(DRUM_LABELS[drum] || drum, px + padSize / 2, py + padSize / 2)
     }
   }
 }
@@ -1632,10 +1902,21 @@ async function startVisualization() {
       const nc = scoreCycles.value
       const scHaps = queryPattern(0, nc)
       const scEvents = hapsToEvents(scHaps)
+      const scDrumEvents = hapsToDrumEvents(scHaps)
 
       const scMx = hoverCanvas.value === 'score' ? hoverX.value : null
       const scMy = hoverCanvas.value === 'score' ? hoverY.value : null
-      if (scCtx) drawScore(scCtx, scEvents, now % nc, nc, scMx, scMy)
+      if (scCtx) drawScore(scCtx, scEvents, now % nc, nc, scMx, scMy, scDrumEvents)
+    } else if (activeGroup.value === 'drums' && !frozen.value) {
+      const drCtx = drumsCanvas.value?.getContext('2d')
+      if (drumsCanvas.value) resizeCanvas(drumsCanvas.value)
+
+      const now = getSchedulerTime()
+      const dc = drumCycles.value
+      const drHaps = queryPattern(0, dc)
+      const drEvents = hapsToDrumEvents(drHaps)
+
+      if (drCtx) drawDrums(drCtx, drEvents, now % dc, dc, drumShowPads.value)
     }
 
     rafId = requestAnimationFrame(draw)
@@ -1670,7 +1951,7 @@ function stopVisualization() {
 
 function clearAll() {
   spectrogramClean = null
-  const canvases = [spectrogramCanvas, waveformCanvas, spectrumCanvas, spiralCanvas, pitchwheelCanvas, pianorollCanvas, keyboardCanvas, scoreCanvas]
+  const canvases = [spectrogramCanvas, waveformCanvas, spectrumCanvas, spiralCanvas, pitchwheelCanvas, pianorollCanvas, keyboardCanvas, scoreCanvas, drumsCanvas]
   for (const c of canvases) {
     const ctx = c.value?.getContext('2d')
     if (ctx) ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height)
@@ -1690,8 +1971,10 @@ function exportScreenshot() {
     if (pianorollCanvas.value) canvases.push(pianorollCanvas.value)
   } else if (activeGroup.value === 'keyboard') {
     if (keyboardCanvas.value) canvases.push(keyboardCanvas.value)
-  } else {
+  } else if (activeGroup.value === 'score') {
     if (scoreCanvas.value) canvases.push(scoreCanvas.value)
+  } else {
+    if (drumsCanvas.value) canvases.push(drumsCanvas.value)
   }
   if (canvases.length === 0) return
 
@@ -1760,6 +2043,7 @@ onUnmounted(() => {
           <button class="viz-tab" :class="{ active: activeGroup === 'notes' }" @click="activeGroup = 'notes'">Notas</button>
           <button class="viz-tab" :class="{ active: activeGroup === 'keyboard' }" @click="activeGroup = 'keyboard'">Teclado</button>
           <button class="viz-tab" :class="{ active: activeGroup === 'score' }" @click="activeGroup = 'score'">Partitura</button>
+          <button class="viz-tab" :class="{ active: activeGroup === 'drums' }" @click="activeGroup = 'drums'">Batería</button>
         </div>
         <div class="viz-actions">
           <button class="viz-btn" :class="{ 'viz-btn-active': frozen }" @click="frozen = !frozen" title="Congelar visualizaciones">
@@ -1947,6 +2231,27 @@ onUnmounted(() => {
             </div>
           </div>
         </template>
+        <template v-if="activeGroup === 'drums'">
+          <div class="settings-group">
+            <span class="settings-group-title">Batería</span>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Ciclos</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.drumCycles.title }}</span><span class="tt-desc">{{ paramHelp.drumCycles.desc }}</span></div>
+              </details>
+              <select v-model.number="drumCycles">
+                <option v-for="n in [1,2,4,8]" :key="n" :value="n">{{ n }}</option>
+              </select>
+            </div>
+            <div class="viz-param">
+              <details class="param-help">
+                <summary class="param-label">Pads</summary>
+                <div class="param-tooltip"><span class="tt-title">{{ paramHelp.drumPads.title }}</span><span class="tt-desc">{{ paramHelp.drumPads.desc }}</span></div>
+              </details>
+              <input type="checkbox" v-model="drumShowPads" />
+            </div>
+          </div>
+        </template>
       </div>
     </div>
     <div class="viz-content" v-show="isExpanded">
@@ -1986,6 +2291,9 @@ onUnmounted(() => {
       </div>
       <div v-show="activeGroup === 'score'" class="viz-container" style="flex: 1">
         <canvas ref="scoreCanvas" @mousemove="(e) => handleCanvasMove('score', e)" @mouseleave="handleCanvasLeave"></canvas>
+      </div>
+      <div v-show="activeGroup === 'drums'" class="viz-container" style="flex: 1">
+        <canvas ref="drumsCanvas"></canvas>
       </div>
     </div>
   </div>
@@ -2057,12 +2365,12 @@ onUnmounted(() => {
 }
 
 .viz-btn {
-  padding: 4px 10px;
+  padding: 5px 12px;
   background: #334155;
   border: none;
   border-radius: 4px;
   color: #94a3b8;
-  font-size: 12px;
+  font-size: 15px;
   cursor: pointer;
   transition: background 0.2s, color 0.2s;
 }
@@ -2095,7 +2403,7 @@ onUnmounted(() => {
 }
 
 .settings-group-title {
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.8px;
@@ -2116,7 +2424,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 11px;
+  font-size: 13px;
   color: #94a3b8;
   white-space: nowrap;
 }
@@ -2161,7 +2469,7 @@ onUnmounted(() => {
   cursor: help;
   border-bottom: 1px dotted #64748b;
   list-style: none;
-  font-size: 11px;
+  font-size: 13px;
   color: #94a3b8;
   user-select: none;
 }
@@ -2175,6 +2483,7 @@ onUnmounted(() => {
 }
 
 .param-tooltip {
+  all: initial;
   position: absolute;
   bottom: calc(100% + 10px);
   left: 0;
@@ -2186,6 +2495,7 @@ onUnmounted(() => {
   box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.5);
   z-index: 200;
   box-sizing: border-box;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
 .param-tooltip-right {
@@ -2194,6 +2504,7 @@ onUnmounted(() => {
 }
 
 .param-tooltip .tt-title {
+  all: initial;
   display: block;
   margin: 0 0 4px 0;
   padding: 0;
@@ -2201,15 +2512,18 @@ onUnmounted(() => {
   font-size: 13px;
   font-weight: bold;
   line-height: 1.4;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
 .param-tooltip .tt-desc {
+  all: initial;
   display: block;
   margin: 0;
   padding: 0;
   color: #cbd5e1;
   font-size: 12px;
   line-height: 1.5;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
 /* Canvas area */

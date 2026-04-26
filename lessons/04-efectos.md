@@ -74,6 +74,24 @@ note("c3 e3 g3 c4")
   .gain(0.7)
 </StrudelBox>
 
+## Controles interactivos (sliders)
+
+Puedes usar `slider()` para crear controles que se ajustan en tiempo real. Los sliders aparecen debajo del editor:
+
+<StrudelBox>
+note("c3 e3 g3 c4")
+  .s("saw")
+  .cutoff(slider(1200, 200, 8000))
+  .room(slider(0.3, 0, 1))
+  .gain(slider(0.5, 0, 1))
+</StrudelBox>
+
+Sintaxis: `slider(valor_inicial, mínimo, máximo)`
+
+::: tip Experimenta
+Pulsa Play y mueve los sliders. Escucharás cómo cambia el filtro, la reverb y el volumen en tiempo real sin necesidad de recargar el código.
+:::
+
 ## Delay (eco)
 
 El delay crea repeticiones del sonido:
@@ -139,18 +157,22 @@ stack(
 - `.delay(n)` + `.delaytime(n)` = eco
 - Los efectos se encadenan: `.cutoff().room().gain()`
 
+## Samples externos
+
+Puedes usar sonidos de cualquier URL pública, incluyendo previews de Freesound:
+
+<StrudelBox>
+samples({ campana: 'https://cdn.freesound.org/previews/411/411089_5121236-lq.mp3' })
+
+s("campana").slow(2).room(0.5)
+</StrudelBox>
+
+Para usar un sonido externo:
+1. Encuentra un sample en [freesound.org](https://freesound.org) u otra web
+2. Copia la URL del archivo de audio
+3. Regístralo con `samples({ nombre: 'URL' })`
+4. Úsalo con `s("nombre")`
+
 ---
 
-## ¿Qué sigue?
-
-Has completado las lecciones básicas. Ahora puedes:
-
-1. Experimentar combinando todo lo aprendido
-2. Visitar [strudel.cc](https://strudel.cc) para aprender más funciones
-3. Crear tus propias composiciones
-
-::: info Recursos adicionales
-- [Documentación oficial de Strudel](https://strudel.cc/learn/getting-started/)
-- [Referencia de funciones](https://strudel.cc/functions/core/)
-- [Comunidad de TidalCycles](https://club.tidalcycles.org/)
-:::
+[Siguiente: Transformaciones →](/lessons/05-transformaciones)

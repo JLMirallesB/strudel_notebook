@@ -35,7 +35,10 @@ export default defineConfig({
           { text: '1. Primeros sonidos', link: '/lessons/01-primeros-sonidos' },
           { text: '2. Ritmos básicos', link: '/lessons/02-ritmos' },
           { text: '3. Melodías', link: '/lessons/03-melodias' },
-          { text: '4. Efectos', link: '/lessons/04-efectos' }
+          { text: '4. Efectos', link: '/lessons/04-efectos' },
+          { text: '5. Transformaciones', link: '/lessons/05-transformaciones' },
+          { text: '6. Mini-notation', link: '/lessons/06-mininotation' },
+          { text: '7. Síntesis', link: '/lessons/07-sintesis' }
         ]
       }
     ],

@@ -73,6 +73,50 @@ note("[c4,e4,g4]").s("sine")
 
 Esto es un acorde de Do mayor.
 
+## Modo guiado
+
+Experimenta cambiando la nota y el oscilador con los desplegables:
+
+<StrudelBox mode="guided">
+note("[[dropdown:c4|d4|e4|f4|g4|a4|b4]]").s("[[dropdown:sine|triangle|square|saw]]")
+</StrudelBox>
+
+Ahora prueba a escribir tu propia secuencia de notas:
+
+<StrudelBox mode="guided">
+note("[[placeholder:escribe notas:c4 e4 g4]]").s("[[dropdown:sine|triangle|square|saw]]")
+</StrudelBox>
+
+## Quiz
+
+Selecciona el oscilador que tiene un sonido **brillante con todos los armónicos** y la nota **Mi4**:
+
+<StrudelBox mode="quiz">
+note("[[quiz:c4|d4|e4|f4|g4|answer:e4]]").s("[[quiz:sine|triangle|square|saw|answer:saw]]")
+</StrudelBox>
+
+Escribe la nota **Sol4** para completar el acorde de Do mayor:
+
+<StrudelBox mode="quiz">
+note("[c4,e4,[[quiz-text:nota:g4]]]").s("sine")
+</StrudelBox>
+
+## Intercambio interactivo
+
+Haz click en cualquier elemento resaltado para cambiarlo por otro equivalente:
+
+<StrudelBox :interchange="true">
+note("c4 e4 g4").s("sine").lpf(800).delay(0.3).gain(0.5)
+</StrudelBox>
+
+## Explora snippets
+
+Prueba diferentes patrones de la librería de snippets:
+
+<StrudelBox :snippets="true">
+note("c4").s("sine")
+</StrudelBox>
+
 ## Ejercicio
 
 Crea una secuencia que alterne entre un acorde y notas individuales:
