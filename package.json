@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@strudel/web": "^1.2.6",
-    "vue": "^3.4.0"
+    "vue": "^3.5.44"
   },
   "devDependencies": {
     "typescript": "^5.5.4",
