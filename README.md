@@ -69,4 +69,10 @@ index.md              # Página principal
 
 ## Licencia
 
-AGPL-3.0. Ver `LICENSE`.
+© 2026 José Luis Miralles Bono ([jlmirall.es](https://jlmirall.es)) · joseluismirallesbono@gmail.com
+
+- **Código:** [GNU AGPL v3](LICENSE). Obligatoria, además, porque usa [Strudel](https://strudel.cc), que es AGPL.
+- **Contenidos** (lecciones, textos y ejemplos musicales): [CC BY-SA 4.0](LICENSE-CONTENIDOS).
+
+Más información: [Vibe-live-coding: jamming con la inteligencia artificial y Strudel](https://elpulpoenelvaso.jlmirall.es/?p=762) ·
+☕ [Invítame a una horchata](https://ko-fi.com/miralles)

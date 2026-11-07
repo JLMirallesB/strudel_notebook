@@ -48,8 +48,8 @@ export default defineConfig({
     ],
 
     footer: {
-      message: 'Hecho con Strudel y VitePress',
-      copyright: 'AGPL-3.0 License'
+      message: 'Hecho con Strudel y VitePress por <a href="https://jlmirall.es" target="_blank">José Luis Miralles Bono</a> con ayuda de Claude · <a href="mailto:joseluismirallesbono@gmail.com">joseluismirallesbono@gmail.com</a> · <a href="https://ko-fi.com/miralles" target="_blank">☕ Invítame a una horchata</a> · <a href="https://elpulpoenelvaso.jlmirall.es/?p=762" target="_blank">Más información sobre este proyecto</a>',
+      copyright: 'Código bajo licencia <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank">AGPL v3</a> · contenidos bajo <a href="https://creativecommons.org/licenses/by-sa/4.0/deed.es" target="_blank">CC BY-SA 4.0</a> · <a href="https://github.com/JLMirallesB/strudel_notebook" target="_blank">código fuente</a>'
     }
   }
 })
